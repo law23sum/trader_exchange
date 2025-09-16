@@ -3,6 +3,9 @@ import cors from 'cors'
 import cookieParser from 'cookie-parser'
 import { OAuth2Client } from 'google-auth-library'
 import db from './db.js'
+import crypto from 'crypto'
+// Optional: req.user can be set by JWT middleware if you mount one
+
 
 const app = express()
 app.use(cors())
@@ -13,7 +16,7 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID
 const oauthClient = new OAuth2Client(GOOGLE_CLIENT_ID)
 
 // --- mock data ---
-let sessionUser = null // NOTE: replace with real sessions/JWT in production
+// sessionUser removed in favor of JWT-based auth
 const traders = [
   { id:'t1', name:'Ava Codes', bio:'Full‑stack engineer', skills:['React','Spring'], rate:85, availability:'Weekdays', portfolio:[], reviews:[{user:'Sam', rating:5, text:'Great work'}] },
   { id:'t2', name:'Ben Build', bio:'Backend specialist', skills:['Node','Postgres'], rate:70, availability:'Evenings', portfolio:[], reviews:[] }
@@ -29,18 +32,106 @@ let favorites = [{ id:'t1', name:'Ava Codes' }]
 let conversationsMem = [] // { id, kind, title, createdAt, lastMessage }
 const msgsMem = new Map() // convId -> [ {id, conversationId, userId, role, content, createdAt} ]
 
-function requireAuth(req, res, next) {
-  if (!sessionUser) return res.status(401).json({ message: 'not authenticated' })
-  next()
+// Return current user from req.user (if a JWT middleware set it) or from demo session
+app.get('/api/me', (req, res) => {
+  try{
+    const u = req.user || null
+    if (!u) return res.status(401).json({ error:'No session' })
+    const id = u.id || u.sub || null
+    const email = u.email || null
+    const role = u.role || null
+    return res.json({ id, email, role })
+  }catch{ return res.status(401).json({ error:'No session' }) }
+})
+
+// --- Auth: signup/signin with password hashing + JWT cookie ---
+function b64url(input){
+  return Buffer.from(input).toString('base64').replace(/=/g,'').replace(/\+/g,'-').replace(/\//g,'_')
 }
+function signJWT(payload){
+  const header = { alg:'HS256', typ:'JWT' }
+  const sec = process.env.JWT_SECRET || 'dev-secret'
+  const now = Math.floor(Date.now()/1000)
+  const exp = now + 60*60*24*7 // 7 days
+  const body = { ...payload, iat: now, exp }
+  const p1 = b64url(JSON.stringify(header))
+  const p2 = b64url(JSON.stringify(body))
+  const data = `${p1}.${p2}`
+  const sig = crypto.createHmac('sha256', sec).update(data).digest('base64').replace(/=/g,'').replace(/\+/g,'-').replace(/\//g,'_')
+  return `${data}.${sig}`
+}
+function hashPassword(password){
+  const salt = crypto.randomBytes(16).toString('hex')
+  const hash = crypto.scryptSync(password, salt, 64).toString('hex')
+  return `s2:${salt}:${hash}`
+}
+function verifyPassword(stored, input){
+  if (!stored) return false
+  if (stored.startsWith('s2:')){
+    const [, salt, hash] = stored.split(':')
+    const calc = crypto.scryptSync(input, salt, 64).toString('hex')
+    return crypto.timingSafeEqual(Buffer.from(hash,'hex'), Buffer.from(calc,'hex'))
+  }
+  // Fallback: legacy plain (not recommended)
+  return stored === input
+}
+
+app.post('/api/signup', (req, res) => {
+  try{
+    if (!db?.available) return res.status(500).json({ error:'DB unavailable' })
+    const name = String(req.body?.name||'').trim() || 'User'
+    const email = String(req.body?.email||'').trim().toLowerCase()
+    const password = String(req.body?.password||'')
+    const role = (String(req.body?.role||'USER').toUpperCase()==='TRADER') ? 'TRADER' : 'USER'
+    if (!email || !password) return res.status(400).json({ error:'Email and password required' })
+    const now = new Date().toISOString()
+    const id = Math.random().toString(36).slice(2,10)
+    const passwordHash = hashPassword(password)
+    try{
+      db.prepare('INSERT INTO users (id,name,email,password,role,createdAt) VALUES (?,?,?,?,?,?)').run(id, name, email, passwordHash, role, now)
+    }catch(e){
+      // If email exists, update name/role and password
+      try{ db.prepare('UPDATE users SET name=?, password=?, role=? WHERE lower(email)=lower(?)').run(name, passwordHash, role, email) }catch{}
+    }
+    const token = signJWT({ sub:id, email, role })
+    const cookieOpts = { httpOnly:true, sameSite:'lax', secure: process.env.NODE_ENV === 'production', path:'/' }
+    res.cookie('token', token, cookieOpts)
+    return res.json({ token, user:{ id, name, email, role } })
+  }catch{ return res.status(500).json({ error:'Signup failed' }) }
+})
+
+app.post('/api/signin', (req, res) => {
+  try{
+    if (!db?.available) return res.status(500).json({ error:'DB unavailable' })
+    const email = String(req.body?.email||'').trim().toLowerCase()
+    const password = String(req.body?.password||'')
+    if (!email || !password) return res.status(400).json({ error:'Email and password required' })
+    const row = db.prepare('SELECT id,name,email,password,role,providerPlayerId FROM users WHERE lower(email)=lower(?)').get(email)
+    if (!row) return res.status(401).json({ error:'Invalid credentials' })
+    if (!verifyPassword(row.password, password)) return res.status(401).json({ error:'Invalid credentials' })
+    const token = signJWT({ sub: row.id, email: row.email, role: row.role })
+    const cookieOpts = { httpOnly:true, sameSite:'lax', secure: process.env.NODE_ENV === 'production', path:'/' }
+    res.cookie('token', token, cookieOpts)
+    return res.json({ token, user:{ id: row.id, name: row.name, email: row.email, role: row.role, providerPlayerId: row.providerPlayerId } })
+  }catch{ return res.status(500).json({ error:'Signin failed' }) }
+})
+
+app.post('/api/signout', (req, res) => {
+  try{ res.clearCookie('token', { httpOnly:true, sameSite:'lax', secure: process.env.NODE_ENV === 'production', path:'/' }) }catch{}
+  return res.json({ ok:true })
+})
+
+// Remove legacy requireAuth; rely on JWT-based middleware if needed
 
 app.post('/api/auth/google', async (req, res) => {
   try {
     const { idToken } = req.body
     const ticket = await oauthClient.verifyIdToken({ idToken, audience: GOOGLE_CLIENT_ID })
     const payload = ticket.getPayload()
-    sessionUser = { sub: payload.sub, email: payload.email, name: payload.name, role: sessionUser?.role || null }
-    res.json(sessionUser)
+    const token = signJWT({ sub: payload.sub, email: payload.email, role: 'USER', name: payload.name })
+    const cookieOpts = { httpOnly:true, sameSite:'lax', secure: process.env.NODE_ENV === 'production', path:'/' }
+    res.cookie('token', token, cookieOpts)
+    res.json({ token, user:{ id: payload.sub, email: payload.email, role:'USER', name: payload.name } })
   } catch (e) {
     res.status(400).json({ message: 'Invalid Google token' })
   }
@@ -98,11 +189,10 @@ app.get('/api/providers/:id', (req, res) => {
       return res.json({ provider: p, listings })
     }
   }catch(e){}
-  // Without DB, only support providers backed by in-memory listing ownership if available
+  // Without DB, return a minimal provider object even if no in-memory listings exist
   const mem = listingsMem.get(req.params.id) || []
-  if (!Array.isArray(mem) || mem.length===0) return res.status(404).json({ message:'Not found' })
-  const provider = { id: req.params.id, name: 'Provider', role:'PROVIDER' }
-  res.json({ provider, listings: mem })
+  const provider = { id: req.params.id, name: 'Provider', role:'PROVIDER', rating: 0, jobs: 0 }
+  return res.json({ provider, listings: Array.isArray(mem) ? mem : [] })
 })
 
 // Trader listings CRUD (demo/in-memory when DB not available)
@@ -166,11 +256,11 @@ const providerReviews = new Map() // providerId -> [ {id, author, rating, text, 
 app.get('/api/providers/:id/reviews', (req, res) => {
   try{ return res.json(providerReviews.get(req.params.id) || []) }catch{ return res.json([]) }
 })
-app.post('/api/providers/:id/reviews', requireAuth, (req, res) => {
+app.post('/api/providers/:id/reviews', jwtRequireAuth, (req, res) => {
   try{
     const pid = req.params.id
     const { rating, text } = req.body||{}
-    const r = { id: Math.random().toString(36).slice(2,10), author: sessionUser?.name||'Customer', rating: Math.max(1, Math.min(5, Number(rating||0))), text: String(text||'').slice(0, 2000), at: new Date().toISOString(), userId: sessionUser?.sub||null }
+    const r = { id: Math.random().toString(36).slice(2,10), author: req.user?.name||'Customer', rating: Math.max(1, Math.min(5, Number(rating||0))), text: String(text||'').slice(0, 2000), at: new Date().toISOString(), userId: (req.user?.sub||null) }
     const arr = providerReviews.get(pid) || []
     arr.unshift(r); providerReviews.set(pid, arr)
     res.json({ ok:true, review:r })
@@ -185,13 +275,14 @@ app.get('/api/traders/:id', requireAuth, (req, res) => {
   res.json(t)
 })
 
-app.get('/api/messages', requireAuth, (req, res) => {
+app.get('/api/messages', jwtRequireAuth, (req, res) => {
   const { traderId } = req.query
-  const rows = messages.filter(m => m.traderId === traderId).map(m => ({ ...m, mine: m.userId === sessionUser.sub }))
+  const uid = req.user?.sub || req.user?.id || null
+  const rows = messages.filter(m => m.traderId === traderId).map(m => ({ ...m, mine: m.userId === uid }))
   res.json(rows)
 })
 
-app.post('/api/messages', requireAuth, (req, res) => {
+app.post('/api/messages', jwtRequireAuth, (req, res) => {
   const { traderId, text } = req.body
   const msg = { id: String(Date.now()), traderId, userId: sessionUser.sub, text, ts: Date.now() }
   messages.push(msg)
@@ -199,7 +290,7 @@ app.post('/api/messages', requireAuth, (req, res) => {
 })
 
 // Checkout (demo)
-app.post('/api/checkout/session', requireAuth, (req, res) => {
+app.post('/api/checkout/session', jwtRequireAuth, (req, res) => {
   const { traderId, quantity = 1 } = req.body
   const t = traders.find(x => x.id === traderId)
   if (!t) return res.status(404).json({ message:'Trader not found' })
@@ -209,17 +300,17 @@ app.post('/api/checkout/session', requireAuth, (req, res) => {
   res.json({ trader: { id:t.id, name:t.name, rate:t.rate }, amount, lineItems })
 })
 
-app.post('/api/checkout/pay', requireAuth, (req, res) => {
+app.post('/api/checkout/pay', jwtRequireAuth, (req, res) => {
   const pending = history.find(h => h.status === 'pending')
   if (pending) pending.status = 'paid'
   res.json({ ok:true })
 })
 
 // Trader routes
-app.get('/api/trader/summary', requireAuth, (req, res) => {
+app.get('/api/trader/summary', requireRole('TRADER'), (req, res) => {
   res.json({ earnings: 12450.75, jobs: 36, rating: 4.8, clients: 22 })
 })
-app.get('/api/trader/history', requireAuth, (req, res) => {
+app.get('/api/trader/history', requireRole('TRADER'), (req, res) => {
   res.json(history.map(h => ({ id:h.id, userName:'You', service:h.service, status:h.status })))
 })
 // Per-user in-memory trader profiles to avoid cross-user leakage
@@ -241,20 +332,20 @@ app.put('/api/trader/profile', requireAuth, (req, res) => {
 })
 
 // Conversations API (in-memory demo)
-app.get('/api/conversations', requireAuth, (req, res) => {
+app.get('/api/conversations', jwtRequireAuth, (req, res) => {
   res.json(conversationsMem)
 })
-app.post('/api/conversations', requireAuth, (req, res) => {
+app.post('/api/conversations', jwtRequireAuth, (req, res) => {
   const id = Math.random().toString(36).slice(2,10)
   const conv = { id, kind: (req.body?.kind||'AI'), title: req.body?.title||'AI Chat', createdAt: new Date().toISOString(), lastMessage: '' }
   conversationsMem.unshift(conv)
   msgsMem.set(id, [])
   res.json(conv)
 })
-app.get('/api/conversations/:id/messages', requireAuth, (req, res) => {
+app.get('/api/conversations/:id/messages', jwtRequireAuth, (req, res) => {
   res.json(msgsMem.get(req.params.id) || [])
 })
-app.post('/api/conversations/:id/messages', requireAuth, async (req, res) => {
+app.post('/api/conversations/:id/messages', jwtRequireAuth, async (req, res) => {
   const id = req.params.id
   const content = String(req.body?.content||'')
   const nowTs = new Date().toISOString()
@@ -281,7 +372,7 @@ app.post('/api/conversations/:id/messages', requireAuth, async (req, res) => {
 })
 
 // Orders management (demo uses same in-memory history list)
-app.get('/api/trader/orders', requireAuth, (req, res) => {
+app.get('/api/trader/orders', requireRole('TRADER'), (req, res) => {
   // In a real app, filter by current trader user
   const rows = history.map(h => ({
     id: h.id,
@@ -295,7 +386,7 @@ app.get('/api/trader/orders', requireAuth, (req, res) => {
   }))
   res.json(rows)
 })
-app.post('/api/trader/orders/:id/action', requireAuth, (req, res) => {
+app.post('/api/trader/orders/:id/action', requireRole('TRADER'), (req, res) => {
   const { action } = req.body || {}
   const id = req.params.id
   const item = history.find(h => h.id === id)
@@ -311,7 +402,7 @@ app.post('/api/trader/orders/:id/action', requireAuth, (req, res) => {
 })
 
 // Create an order from a service request (demo)
-app.post('/api/orders/request', requireAuth, (req, res) => {
+app.post('/api/orders/request', jwtRequireAuth, (req, res) => {
   try{
     const { providerId, listingId, title, details, date, time, conversationId } = req.body||{}
     const item = {
