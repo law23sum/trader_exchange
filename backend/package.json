@@ -1,0 +1,21 @@
+{
+  "name": "trade-exchange-backend",
+  "version": "1.1.0",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "node src/server.js",
+    "seed": "node src/seed.js",
+    "reset-db": "node src/reset.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "zod": "^3.23.8",
+    "cookie-parser": "^1.4.6",
+    "google-auth-library": "^9.0.0"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^9.6.0"
+  }
+}
