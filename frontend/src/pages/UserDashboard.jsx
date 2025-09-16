@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { fetchAuthed } from '../hooks/useAuth.js'
+import { fetchAuthed, setToken } from '../hooks/useAuth.js'
 import { Section, Pill, PlayerBadge, Button, Input } from '../components/ui.js'
 import { Link, useNavigate } from 'react-router-dom'
 
@@ -34,7 +34,21 @@ export default function UserDashboard(){
       <div className="flex items-start justify-between mb-4">
         <h1 className="text-2xl font-semibold">Welcome{me ? `, ${me.name}` : ''}</h1>
         {me && me.role !== 'TRADER' && (
-          <Button onClick={async ()=>{ try{ const r = await fetchAuthed('/api/become-provider', { method:'POST' }); if (r.ok){ window.location.href = '/dashboard/trader' } else { alert('Could not upgrade to provider') } }catch{ alert('Could not upgrade to provider') } }}>Become a provider</Button>
+          <Button onClick={async ()=>{
+            try{
+              const r = await fetchAuthed('/api/become-provider', { method:'POST' })
+              let data = null
+              try{ data = await r.json() }catch{}
+              if (r.ok){
+                if (data?.token) setToken(data.token)
+                window.location.href = '/dashboard/trader'
+              } else {
+                alert((data && (data.error || data.message)) || 'Could not upgrade to provider')
+              }
+            }catch{
+              alert('Could not upgrade to provider')
+            }
+          }}>Become a provider</Button>
         )}
       </div>
 
