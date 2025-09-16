@@ -57,15 +57,9 @@ app.get('/api/categories', (req, res) => {
   }catch{}
   res.json(['home','outdoor','photo','creative','tutor','algebra'])
 })
-// Demo public data (fallback when DB is unavailable)
-const demoPlayers = [
-  { id: 'p1', name: 'Ava Provider', role:'PROVIDER', rating:4.8, jobs:124, location:'Austin, TX', hourlyRate:75, specialties:'lawn, weekly', bio:'Reliable outdoor work.' },
-  { id: 'p2', name: 'Milo Provider', role:'PROVIDER', rating:4.6, jobs:58, location:'Seattle, WA', hourlyRate:120, specialties:'photo, portrait', bio:'Natural light portraits.' },
-]
-const demoListings = [
-  { id:'l1', title:'Lawn Care — quarter acre', description:'Mow, trim, and edge.', price:85, providerId:'p1', status:'LISTED', createdAt:new Date().toISOString(), tags:'home,outdoor,weekly,lawn,mow' },
-  { id:'l2', title:'Portrait Session — 1 hour', description:'Natural light portraits.', price:220, providerId:'p2', status:'LISTED', createdAt:new Date().toISOString(), tags:'photo,creative,portrait,camera' },
-]
+// No demo players/listings; rely on DB or in-memory created content
+const demoPlayers = []
+const demoListings = []
 // In-memory listings for demo when DB is unavailable
 const listingsMem = new Map() // providerId -> [ { id,title,description,price,providerId,status,createdAt,tags } ]
 
@@ -77,7 +71,7 @@ app.get('/api/players', (req, res) => {
       return res.json(rows)
     }
   }catch(e){}
-  res.json(demoPlayers)
+  res.json([])
 })
 // Public listings
 app.get('/api/listings', (req, res) => {
@@ -104,13 +98,11 @@ app.get('/api/providers/:id', (req, res) => {
       return res.json({ provider: p, listings })
     }
   }catch(e){}
-  const p = demoPlayers.find(x=>x.id===req.params.id)
-  if (!p) return res.status(404).json({ message:'Not found' })
+  // Without DB, only support providers backed by in-memory listing ownership if available
   const mem = listingsMem.get(req.params.id) || []
-  const listings = (Array.isArray(mem) && mem.length>0)
-    ? mem
-    : demoListings.filter(x=>x.providerId===req.params.id)
-  res.json({ provider: p, listings })
+  if (!Array.isArray(mem) || mem.length===0) return res.status(404).json({ message:'Not found' })
+  const provider = { id: req.params.id, name: 'Provider', role:'PROVIDER' }
+  res.json({ provider, listings: mem })
 })
 
 // Trader listings CRUD (demo/in-memory when DB not available)
@@ -169,22 +161,20 @@ app.put('/api/trader/listings/:id', requireAuth, (req, res) => {
   res.json(found)
 })
 
-// Reviews (demo)
+// Reviews (in-memory demo)
+const providerReviews = new Map() // providerId -> [ {id, author, rating, text, at, userId} ]
 app.get('/api/providers/:id/reviews', (req, res) => {
+  try{ return res.json(providerReviews.get(req.params.id) || []) }catch{ return res.json([]) }
+})
+app.post('/api/providers/:id/reviews', requireAuth, (req, res) => {
   try{
-    let prov = null
-    if (db?.available) prov = db.prepare('SELECT name,rating FROM players WHERE id=?').get(req.params.id)
-    if (!prov) prov = demoPlayers.find(x=>x.id===req.params.id)
-    const base = Math.max(1, Math.round((prov?.rating||4.5)))
-    const reviews = Array.from({ length: 4 }, (_,i)=>({
-      id: `rvw_${i}`,
-      author: ['Alex','Sam','Rae','Kai'][i%4],
-      rating: Math.max(3, Math.min(5, base + (i%2?0:-1))),
-      text: i%2? 'Great communication and timely delivery.' : 'Quality work, would recommend.',
-      at: new Date(Date.now()- (i+1)*86400000).toISOString()
-    }))
-    res.json(reviews)
-  }catch{ res.json([]) }
+    const pid = req.params.id
+    const { rating, text } = req.body||{}
+    const r = { id: Math.random().toString(36).slice(2,10), author: sessionUser?.name||'Customer', rating: Math.max(1, Math.min(5, Number(rating||0))), text: String(text||'').slice(0, 2000), at: new Date().toISOString(), userId: sessionUser?.sub||null }
+    const arr = providerReviews.get(pid) || []
+    arr.unshift(r); providerReviews.set(pid, arr)
+    res.json({ ok:true, review:r })
+  }catch{ res.status(400).json({ ok:false }) }
 })
 app.get('/api/history', requireAuth, (req, res) => res.json(history))
 app.get('/api/favorites', requireAuth, (req, res) => res.json(favorites))
@@ -232,14 +222,23 @@ app.get('/api/trader/summary', requireAuth, (req, res) => {
 app.get('/api/trader/history', requireAuth, (req, res) => {
   res.json(history.map(h => ({ id:h.id, userName:'You', service:h.service, status:h.status })))
 })
-let traderProfile = { bio:'Full‑stack engineer', skills:'React, Spring', rate:85, availability:'Weekdays' }
+// Per-user in-memory trader profiles to avoid cross-user leakage
+const traderProfiles = new Map() // key: sessionUser.sub/email -> profile object
 app.get('/api/trader/profile', requireAuth, (req, res) => {
+  const key = sessionUser?.sub || sessionUser?.email || 'anon'
+  const profile = traderProfiles.get(key) || {}
   const full = (sessionUser?.name||'').trim()
-  const firstName = traderProfile.firstName || (full ? full.split(/\s+/)[0] : '')
-  const lastName = traderProfile.lastName || (full ? full.split(/\s+/).slice(1).join(' ') : '')
-  res.json({ ...traderProfile, firstName, lastName })
+  const firstName = profile.firstName || (full ? full.split(/\s+/)[0] : '')
+  const lastName = profile.lastName || (full ? full.split(/\s+/).slice(1).join(' ') : '')
+  res.json({ ...profile, firstName, lastName, id: profile.providerId || null })
 })
-app.put('/api/trader/profile', requireAuth, (req, res) => { traderProfile = { ...traderProfile, ...req.body }; res.json(traderProfile) })
+app.put('/api/trader/profile', requireAuth, (req, res) => {
+  const key = sessionUser?.sub || sessionUser?.email || 'anon'
+  const prev = traderProfiles.get(key) || {}
+  const next = { ...prev, ...req.body }
+  traderProfiles.set(key, next)
+  res.json(next)
+})
 
 // Conversations API (in-memory demo)
 app.get('/api/conversations', requireAuth, (req, res) => {
@@ -301,7 +300,7 @@ app.post('/api/trader/orders/:id/action', requireAuth, (req, res) => {
   const id = req.params.id
   const item = history.find(h => h.id === id)
   if (!item) return res.status(404).json({ message:'Order not found' })
-  const map = { approve:'approved', deny:'denied', refund:'refunded', discuss:'discuss', exchange:'exchange' }
+  const map = { approve:'approved', deny:'denied', refund:'refunded', discuss:'discuss', exchange:'exchange', complete:'complete' }
   const next = map[String(action||'').toLowerCase()]
   if (!next) return res.status(400).json({ message:'Invalid action' })
   item.status = next
