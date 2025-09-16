@@ -37,6 +37,7 @@ const now = () => new Date().toISOString();
 const users = [
   { id: uid(), name: "Demo User", email: "user@example.com", password: "password", role: "USER", createdAt: now() },
   { id: uid(), name: "Demo Trader", email: "trader@example.com", password: "password", role: "TRADER", createdAt: now() },
+  { id: uid(), name: "Admin", email: "admin@example.com", password: "password", role: "ADMIN", createdAt: now() },
 ];
 const insU = db.prepare("INSERT INTO users (id,name,email,password,role,createdAt) VALUES (@id,@name,@email,@password,@role,@createdAt)");
 for (const u of users) insU.run(u);

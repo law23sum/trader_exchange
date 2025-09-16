@@ -111,8 +111,10 @@ function seedMemUsers(){
   const u1 = { id: Math.random().toString(36).slice(2,10), name:'Demo User', email:'user@example.com', password: hash('password'), role:'USER', createdAt: now }
   const pid = 'p_' + Math.random().toString(36).slice(2,8)
   const u2 = { id: Math.random().toString(36).slice(2,10), name:'Demo Trader', email:'trader@example.com', password: hash('password'), role:'TRADER', createdAt: now, providerPlayerId: pid }
+  const u3 = { id: Math.random().toString(36).slice(2,10), name:'Admin', email:'admin@example.com', password: hash('password'), role:'ADMIN', createdAt: now }
   usersMem.set(u1.email.toLowerCase(), u1)
   usersMem.set(u2.email.toLowerCase(), u2)
+  usersMem.set(u3.email.toLowerCase(), u3)
 }
 seedMemUsers()
 
@@ -428,8 +430,12 @@ app.post('/api/providers/:id/reviews', requireAuth, (req, res) => {
     res.json({ ok:true, review:r })
   }catch{ res.status(400).json({ ok:false }) }
 })
+// Legacy + canonical routes for user data
 app.get('/api/history', requireAuth, (req, res) => res.json(history))
 app.get('/api/favorites', requireAuth, (req, res) => res.json(favorites))
+// Compatibility aliases expected by the frontend
+app.get('/api/user/history', requireAuth, (req, res) => res.json(history))
+app.get('/api/user/favorites', requireAuth, (req, res) => res.json(favorites))
 
 app.get('/api/traders/:id', requireAuth, (req, res) => {
   const t = traders.find(x => x.id === req.params.id)
@@ -534,7 +540,7 @@ app.post('/api/conversations/:id/messages', requireAuth, async (req, res) => {
 })
 
 // Orders management (demo uses same in-memory history list)
-app.get('/api/trader/orders', requireRole('TRADER'), (req, res) => {
+app.get('/api/trader/orders', requireRole('TRADER','ADMIN'), (req, res) => {
   // In a real app, filter by current trader user
   const rows = history.map(h => ({
     id: h.id,
@@ -561,6 +567,62 @@ app.post('/api/trader/orders/:id/action', requireRole('TRADER'), (req, res) => {
     item.request = { ...(item.request||{}), ack:true }
   }
   res.json({ ok:true, order: item })
+})
+
+// ---- Admin endpoints ----
+app.get('/api/admin/users', requireRole('ADMIN'), (req, res) => {
+  try{
+    if (db?.available){
+      const rows = db.prepare('SELECT id,name,email,role,createdAt,providerPlayerId FROM users').all()
+      return res.json(rows)
+    }
+  }catch{}
+  // Fallback to in-memory users
+  const rows = Array.from(usersMem.values()).map(u => ({ id:u.id, name:u.name, email:u.email, role:u.role, createdAt:u.createdAt, providerPlayerId: u.providerPlayerId||null }))
+  return res.json(rows)
+})
+
+app.delete('/api/admin/users/:id', requireRole('ADMIN'), (req, res) => {
+  const id = String(req.params.id)
+  try{
+    if (db?.available){ db.prepare('DELETE FROM users WHERE id=?').run(id); return res.json({ ok:true }) }
+  }catch{}
+  // In-memory
+  for (const [k,v] of usersMem.entries()){
+    if (String(v.id)===id){ usersMem.delete(k); break }
+  }
+  return res.json({ ok:true })
+})
+
+app.delete('/api/admin/providers/:id', requireRole('ADMIN'), (req, res) => {
+  const pid = String(req.params.id)
+  try{
+    if (db?.available){
+      db.prepare('DELETE FROM listings WHERE providerId=?').run(pid)
+      db.prepare('DELETE FROM players WHERE id=?').run(pid)
+      return res.json({ ok:true })
+    }
+  }catch{}
+  // In-memory
+  try{ listingsMem.delete(pid) }catch{}
+  // Remove from demo arrays
+  try{ const idx = demoPlayers.findIndex(p=>String(p.id)===pid); if (idx>=0) demoPlayers.splice(idx,1) }catch{}
+  for (let i = demoListings.length-1; i>=0; i--){ if (String(demoListings[i].providerId)===pid) demoListings.splice(i,1) }
+  return res.json({ ok:true })
+})
+
+app.delete('/api/admin/listings/:id', requireRole('ADMIN'), (req, res) => {
+  const id = String(req.params.id)
+  try{
+    if (db?.available){ db.prepare('DELETE FROM listings WHERE id=?').run(id); return res.json({ ok:true }) }
+  }catch{}
+  // In-memory
+  for (const [pid, arr] of listingsMem.entries()){
+    const next = (arr||[]).filter(l => String(l.id)!==id)
+    listingsMem.set(pid, next)
+  }
+  for (let i = demoListings.length-1; i>=0; i--){ if (String(demoListings[i].id)===id) demoListings.splice(i,1) }
+  return res.json({ ok:true })
 })
 
 // Create an order from a service request (demo)
@@ -605,6 +667,35 @@ app.get('/api/orders/status', requireAuth, (req, res) => {
 
 const port = process.env.PORT || 4000
 app.listen(port, () => console.log(`API running on :${port}`))
+
+// ---- Dev utilities (non-production only) ----
+app.post('/api/dev/elevate', requireAuth, (req, res) => {
+  if (process.env.NODE_ENV === 'production') return res.status(403).json({ error:'Forbidden' })
+  try{
+    const want = String(req.body?.role||'').toUpperCase()
+    if (!want || !['USER','TRADER','ADMIN'].includes(want)) return res.status(400).json({ error:'Invalid role' })
+    const id = req.user?.sub
+    const email = req.user?.email
+    let ok = false
+    try{
+      if (db?.available){
+        db.prepare('UPDATE users SET role=? WHERE id=?').run(want, id)
+        ok = true
+      }
+    }catch{}
+    if (!ok){
+      // In-memory
+      const key = String(email||'').toLowerCase()
+      const row = key ? usersMem.get(key) : null
+      if (row){ row.role = want; usersMem.set(key, row); ok = true }
+    }
+    if (!ok) return res.status(400).json({ error:'User not found' })
+    const token = signJWT({ sub:id, email, role: want })
+    const cookieOpts = { httpOnly:true, sameSite:'lax', secure: process.env.NODE_ENV === 'production', path:'/' }
+    res.cookie('token', token, cookieOpts)
+    return res.json({ ok:true, role: want, token })
+  }catch{ return res.status(500).json({ error:'Failed' }) }
+})
 // Health check
 app.get('/api/health', (_req, res) => res.json({ ok: true }))
 app.get('/health', (_req, res) => res.json({ ok: true }))
