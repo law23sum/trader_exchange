@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS users (
   name TEXT NOT NULL,
   email TEXT UNIQUE NOT NULL,
   password TEXT NOT NULL,
-  role TEXT CHECK(role IN ('USER','TRADER')) NOT NULL,
+  role TEXT CHECK(role IN ('USER','TRADER','ADMIN')) NOT NULL,
   createdAt TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS sessions (
@@ -101,6 +101,20 @@ try {
   if (!db.available) throw new Error('no db');
   if (!hasColumn('users','providerPlayerId')) {
     db.exec(`ALTER TABLE users ADD COLUMN providerPlayerId TEXT`);
+  }
+} catch {}
+
+try {
+  if (!db.available) throw new Error('no db');
+  if (!hasColumn('users','password')) {
+    db.exec(`ALTER TABLE users ADD COLUMN password TEXT DEFAULT ''`);
+  }
+} catch {}
+
+try {
+  if (!db.available) throw new Error('no db');
+  if (!hasColumn('users','createdAt')) {
+    db.exec(`ALTER TABLE users ADD COLUMN createdAt TEXT DEFAULT ''`);
   }
 } catch {}
 

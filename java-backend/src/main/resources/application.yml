@@ -5,6 +5,8 @@ app:
   # Path to the existing SQLite DB used by the Node backend
   sqlite:
     path: ../backend/trade.db
+  jwt:
+    secret: ${JWT_SECRET:dev-secret}
 
 spring:
   jackson:
