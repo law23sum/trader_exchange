@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { Routes, Route, useNavigate, Link, useLocation, Navigate } from 'react-router-dom'
+import { Routes, Route, useNavigate, Link, Navigate } from 'react-router-dom'
 import HomeSearch from './pages/HomeSearch.jsx'
 import ResultsPage from './pages/ResultsPage.jsx'
 import TraderDetailsPage from './pages/TraderDetailsPage.jsx'
@@ -9,6 +9,7 @@ import SignIn from './pages/SignIn.jsx'
 import SignUp from './pages/SignUp.jsx'
 import UserDashboard from './pages/UserDashboard.jsx'
 import TraderDashboard from './pages/TraderDashboard.jsx'
+import AdminDashboard from './pages/AdminDashboard.jsx'
 import About from './pages/About.jsx'
 
 // Robust trader detection to handle different backends
@@ -20,6 +21,11 @@ function isTrader(u){
   if (u.providerId || u.providerPlayerId || u.provider || u.traderId) return true
   if (typeof u.email === 'string' && u.email.toLowerCase().includes('trader')) return true
   return false
+}
+
+function isAdmin(u){
+  if (!u) return false
+  return String(u.role || '').toUpperCase() === 'ADMIN'
 }
 
 import Contact from './pages/Contact.jsx'
@@ -35,7 +41,7 @@ import ConversationPage from './pages/ConversationPage.jsx'
 import AuthCallback from './pages/AuthCallback.jsx'
 import BecomeProvider from './pages/BecomeProvider.jsx'
 import { Input, Button } from './components/ui.js'
-import { fetchAuthed, setToken, getToken } from './hooks/useAuth.js'
+import { fetchAuthed, setToken } from './hooks/useAuth.js'
 
 function DashboardRedirect({ me }){
   // Fallback: try local cache if me not loaded yet
@@ -44,26 +50,40 @@ function DashboardRedirect({ me }){
     if (!me && cached) me = cached
   } catch {}
   if (!me) return <div className="p-4 text-sm text-gray-600">Loading…</div>
+  if (isAdmin(me)) return <Navigate to="/admin" replace />
   const goTrader = isTrader(me)
   return <Navigate to={goTrader ? '/dashboard/trader' : '/dashboard/user'} replace />
 }
 
-function TraderOnly({ me, children }){
-  if (!me) return <div className="p-4 text-sm text-gray-600">Loading…</div>
+function TraderOnly({ me, loading, children }){
+  if (loading) return <div className="p-4 text-sm text-gray-600">Loading…</div>
+  if (!me) return <Navigate to="/signin" replace />
+  if (isAdmin(me)) return <Navigate to="/admin" replace />
   return isTrader(me) ? children : <Navigate to="/dashboard/user" replace />
 }
-function UserOnly({ me, children }){
-  if (!me) return <div className="p-4 text-sm text-gray-600">Loading…</div>
+function UserOnly({ me, loading, children }){
+  if (loading) return <div className="p-4 text-sm text-gray-600">Loading…</div>
+  if (!me) return <Navigate to="/signin" replace />
+  if (isAdmin(me)) return <Navigate to="/admin" replace />
   return !isTrader(me) ? children : <Navigate to="/dashboard/trader" replace />
+}
+
+function AdminOnly({ me, loading, children }){
+  if (loading) return <div className="p-4 text-sm text-gray-600">Loading…</div>
+  if (!me) return <Navigate to="/signin" replace />
+  return isAdmin(me) ? children : <Navigate to={isTrader(me) ? '/dashboard/trader' : '/dashboard/user'} replace />
 }
 
 
 export default function App(){
-  const loc = useLocation()
   const [q, setQ] = useState('')
   const [me, setMe] = useState(null)
   const [loadingMe, setLoadingMe] = useState(true)
   const navigate = useNavigate()
+
+  const admin = isAdmin(me)
+  const trader = isTrader(me)
+  const dashboardPath = admin ? '/admin' : (trader ? '/dashboard/trader' : '/dashboard/user')
 
   const onSubmit = (e) => { e?.preventDefault?.(); navigate(`/results?q=${encodeURIComponent(q)}`) }
 
@@ -111,7 +131,7 @@ export default function App(){
             )}
             {me && (
               <>
-                <Link to={(isTrader(me) || me?.providerPlayerId) ? '/dashboard/trader' : '/dashboard/user'} className="text-sm underline">Dashboard</Link>
+                <Link to={dashboardPath} className="text-sm underline">{admin ? 'Admin' : 'Dashboard'}</Link>
                 <Button variant="ghost" onClick={signOut}>Sign out</Button>
               </>
             )}
@@ -120,22 +140,23 @@ export default function App(){
       </header>
 
       <Routes>
-        <Route path="/" element={me && (isTrader(me) || me?.providerPlayerId) ? <Navigate replace to="/dashboard/trader" /> : <HomeSearch onSearch={onSubmit} q={q} setQ={setQ} />} />
+        <Route path="/" element={me ? <Navigate replace to={dashboardPath} /> : <HomeSearch onSearch={onSubmit} q={q} setQ={setQ} />} />
         <Route path="/results" element={<ResultsPage />} />
         <Route path="/provider/:id" element={<TraderDetailsPage />} />
         <Route path="/confirm/:listingId/:providerId/:price" element={<ConfirmationPage />} />
         <Route path="/checkout/:listingId/:providerId/:price" element={<CheckoutPage />} />
 
-        <Route path="/signin" element={me ? <Navigate replace to={(isTrader(me) || me?.providerPlayerId) ? '/dashboard/trader' : '/dashboard/user'} /> : <SignIn onAuthed={loadMe} />} />
-        <Route path="/signup" element={me ? <Navigate replace to={(isTrader(me) || me?.providerPlayerId) ? '/dashboard/trader' : '/dashboard/user'} /> : <SignUp onAuthed={loadMe} />} />
-        <Route path="/dashboard/user" element={me && (isTrader(me) || me?.providerPlayerId) ? <Navigate replace to="/dashboard/trader" /> : <UserDashboard />} />
-        <Route path="/dashboard/trader" element={me && !(isTrader(me) || me?.providerPlayerId) ? <Navigate replace to="/dashboard/user" /> : <TraderDashboard />} />
+        <Route path="/signin" element={me ? <Navigate replace to={dashboardPath} /> : <SignIn onAuthed={loadMe} />} />
+        <Route path="/signup" element={me ? <Navigate replace to={dashboardPath} /> : <SignUp onAuthed={loadMe} />} />
+        <Route path="/dashboard/user" element={<UserOnly me={me} loading={loadingMe}><UserDashboard /></UserOnly>} />
+        <Route path="/dashboard/trader" element={<TraderOnly me={me} loading={loadingMe}><TraderDashboard /></TraderOnly>} />
+        <Route path="/admin" element={<AdminOnly me={me} loading={loadingMe}><AdminDashboard /></AdminOnly>} />
         <Route path="/auth/callback" element={<AuthCallback />} />
         <Route path="/messages" element={<MessagesList />} />
         <Route path="/messages/:id" element={<ConversationPage />} />
 
         <Route path="/about" element={<About />} />
-        <Route path="/become-a-provider" element={me && (isTrader(me) || me?.providerPlayerId) ? <Navigate replace to="/dashboard/trader" /> : <BecomeProvider />} />
+        <Route path="/become-a-provider" element={me && (admin || trader || me?.providerPlayerId) ? <Navigate replace to={dashboardPath} /> : <BecomeProvider />} />
         <Route path="/contact" element={<Contact />} />
         <Route path="/help" element={<Help />} />
         <Route path="/pricing" element={<Pricing />} />

@@ -35,9 +35,11 @@ export default function SignIn({ onAuthed }){
       if (!res.ok) { setError((data && (data.error || data.message)) || `Sign in failed (HTTP ${res.status})`); return; }
       setToken(data.token)
       await onAuthed?.()
-      localStorage.setItem('tx_last_role', data.user.role);
+      const role = String(data.user.role || '').toUpperCase();
+      localStorage.setItem('tx_last_role', role);
+      if (role === 'ADMIN'){ navigate('/admin'); return; }
       const u = data.user;
-      const trader = (u.role==='TRADER') || u.isTrader || u.isProvider || u.providerId || u.providerPlayerId || (Array.isArray(u.roles)&&u.roles.includes('TRADER'));
+      const trader = (role === 'TRADER') || u.isTrader || u.isProvider || u.providerId || u.providerPlayerId || (Array.isArray(u.roles)&&u.roles.map(r=>String(r).toUpperCase()).includes('TRADER'));
       navigate(trader ? '/dashboard/trader' : '/dashboard/user')
     }catch (e){ setError(`Could not reach the server${e?.name==='AbortError' ? ' (timeout)' : e?.message ? ` (${e.message})` : ''}. Is the backend running?`) }
   }
@@ -49,10 +51,12 @@ export default function SignIn({ onAuthed }){
         const data = await res.json()
         setToken(data.token)
         await onAuthed?.()
-        localStorage.setItem('tx_last_role', data.user.role);
-      const u = data.user;
-      const trader = (u.role==='TRADER') || u.isTrader || u.isProvider || u.providerId || u.providerPlayerId || (Array.isArray(u.roles)&&u.roles.includes('TRADER'));
-      navigate(trader ? '/dashboard/trader' : '/dashboard/user')
+        const role = String(data.user.role || '').toUpperCase();
+        localStorage.setItem('tx_last_role', role);
+        if (role === 'ADMIN'){ navigate('/admin'); return; }
+        const u = data.user;
+        const trader = (role === 'TRADER') || u.isTrader || u.isProvider || u.providerId || u.providerPlayerId || (Array.isArray(u.roles)&&u.roles.map(r=>String(r).toUpperCase()).includes('TRADER'));
+        navigate(trader ? '/dashboard/trader' : '/dashboard/user')
         return
       }
       window.location.href = '/api/auth/google/start'

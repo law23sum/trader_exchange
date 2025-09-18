@@ -345,6 +345,27 @@ function hashPassword(password){
   const hash = crypto.scryptSync(password, salt, 64).toString('hex')
   return `s2:${salt}:${hash}`
 }
+
+function ensureAdminUser(){
+  if (!db?.available) return
+  try{
+    const email = 'admin@example.com'
+    const row = db.prepare('SELECT id,name,email,password,role,createdAt FROM users WHERE lower(email)=lower(?)').get(email)
+    const nowIso = new Date().toISOString()
+    if (!row){
+      const id = randomId()
+      const passwordHash = hashPassword('password')
+      db.prepare('INSERT INTO users (id,name,email,password,role,createdAt) VALUES (?,?,?,?,?,?)')
+        .run(id, 'Admin', email, passwordHash, 'ADMIN', nowIso)
+      return
+    }
+    const passwordHash = row.password ? row.password : hashPassword('password')
+    db.prepare('UPDATE users SET role=?, name=COALESCE(name, ?), password=?, createdAt=COALESCE(createdAt, ?) WHERE id=?')
+      .run('ADMIN', row.name || 'Admin', passwordHash, row.createdAt || nowIso, row.id)
+  }catch{}
+}
+
+ensureAdminUser()
 function verifyPassword(stored, input){
   if (!stored) return false
   if (stored.startsWith('s2:')){
@@ -475,17 +496,17 @@ const listingsMem = new Map() // providerId -> [ { id,title,description,price,pr
 app.get('/api/players', (req, res) => {
   try{
     if (db?.available) {
-      const rows = db.prepare('SELECT id,name,role,rating,jobs,location,hourlyRate,specialties,bio FROM players').all()
-      if (rows && rows.length > 0) return res.json(rows)
+      const rows = db.prepare('SELECT * FROM players').all()
+      if (rows && rows.length > 0) return res.json(rows.map(row => normalizeProvider(row, row?.id || null, row?.name || 'Provider')))
     }
   }catch(e){}
   // Without DB, use demo players or synthesize from in-memory listings
-  if (demoPlayers.length>0) return res.json(demoPlayers)
+  if (demoPlayers.length>0) return res.json(demoPlayers.map(p => normalizeProvider(p, p?.id || null, p?.name || 'Provider')))
   const set = new Map()
   for (const [pid, arr] of listingsMem.entries()){
     if (Array.isArray(arr) && arr.length>0){
       const name = `Provider ${pid}`
-      set.set(pid, { id: pid, name, role:'PROVIDER', rating: 0, jobs: 0 })
+      set.set(pid, normalizeProvider({ id: pid, name, role:'PROVIDER', rating: 0, jobs: 0 }, pid, name))
     }
   }
   return res.json(Array.from(set.values()))
@@ -532,11 +553,11 @@ app.get('/api/search', (req, res) => {
   const allProviders = (()=>{
     if (db?.available){
       try{
-        const rows = db.prepare('SELECT id,name,role,rating,jobs,location,hourlyRate,bio FROM players').all()
-        if (rows && rows.length>0) return rows
+        const rows = db.prepare('SELECT * FROM players').all()
+        if (rows && rows.length>0) return rows.map(row => normalizeProvider(row, row?.id || null, row?.name || 'Provider'))
       }catch{}
     }
-    return demoPlayers
+    return demoPlayers.map(p => normalizeProvider(p, p?.id || null, p?.name || 'Provider'))
   })()
   const allListings = (()=>{
     if (db?.available){

@@ -25,26 +25,82 @@ export default function ResultsPage(){
   const q = params.get('q') || '';
   const navigate = useNavigate();
   const [searchQ, setSearchQ] = useState(q);
+  const [searchProviders, setSearchProviders] = useState([]);
+  const [searchListings, setSearchListings] = useState([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchFetched, setSearchFetched] = useState(false);
 
   useEffect(() => {
     (async () => {
       try{
         const [p,l] = await Promise.all([fetch('/api/players'), fetch('/api/listings')]);
-        setPlayers(await p.json());
+        const playersJson = await p.json();
+        setPlayers(Array.isArray(playersJson) ? playersJson : []);
         const raw = await l.json();
-        setListings(raw.map(x => ({...x, tags:(x.tags||'').split(',').filter(Boolean)})));
+        const mapped = Array.isArray(raw) ? raw : [];
+        setListings(mapped.map(x => ({...x, tags: typeof x.tags === 'string' ? x.tags.split(',').map(t=>t.trim()).filter(Boolean) : Array.isArray(x.tags) ? x.tags : [] })));
       }catch{}
     })();
   }, []);
 
+  useEffect(() => {
+    let ignore = false;
+    if (!q){
+      setSearchProviders([]);
+      setSearchListings([]);
+      setSearchFetched(false);
+      setSearchLoading(false);
+      return;
+    }
+    setSearchLoading(true);
+    setSearchFetched(false);
+    (async () => {
+      try{
+        const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+        if (ignore) return;
+        if (res.ok){
+          const data = await res.json();
+          const prov = Array.isArray(data?.providers) ? data.providers : [];
+          const list = Array.isArray(data?.listings) ? data.listings : [];
+          setSearchProviders(prov);
+          setSearchListings(list.map(x => ({...x, tags: typeof x.tags === 'string' ? x.tags.split(',').map(t=>t.trim()).filter(Boolean) : Array.isArray(x.tags) ? x.tags : [] })));
+        } else {
+          setSearchProviders([]);
+          setSearchListings([]);
+        }
+      }catch{
+        if (!ignore){
+          setSearchProviders([]);
+          setSearchListings([]);
+        }
+      }finally{
+        if (!ignore){
+          setSearchLoading(false);
+          setSearchFetched(true);
+        }
+      }
+    })();
+    return () => { ignore = true; };
+  }, [q]);
+
   const recs = useMemo(() => {
-    const providers = players.filter(p => p.role === 'PROVIDER');
-    return providers.map(p => ({
+    const sourceProviders = q ? searchProviders : players;
+    const sourceListings = q ? searchListings : listings;
+    const providers = (sourceProviders || []).filter(p => String(p.role || '').toUpperCase() === 'PROVIDER');
+    const unique = [];
+    const seen = new Set();
+    for (const p of providers){
+      const key = String(p.id || '');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      unique.push(p);
+    }
+    return unique.map(p => ({
       provider: p,
-      listings: listings.filter(l => l.providerId === p.id),
-      score: scoreProviderForQuery(p, listings, q)
+      listings: sourceListings.filter(l => String(l.providerId) === String(p.id)),
+      score: scoreProviderForQuery(p, sourceListings, q)
     })).sort((a,b)=>b.score-a.score);
-  }, [players, listings, q]);
+  }, [players, listings, searchProviders, searchListings, q]);
 
   return (
     <main className="max-w-6xl mx-auto px-4 py-6">
@@ -55,8 +111,15 @@ export default function ResultsPage(){
         </form>
       </div>
       <div className="flex items-center justify-between mb-4">
-        <h2 className="text-xl font-semibold">Recommended traders for “{q || '(blank)'}”</h2>
+        <h2 className="text-xl font-semibold">{q ? `Results for “${q}”` : 'Recommended traders'}</h2>
+        <div className="text-sm text-gray-500">{recs.length} {recs.length === 1 ? 'match' : 'matches'}</div>
       </div>
+      {q && searchLoading && (
+        <div className="text-sm text-gray-500 mb-3">Searching providers…</div>
+      )}
+      {q && !searchLoading && searchFetched && recs.length === 0 && (
+        <div className="text-sm text-gray-500 mb-3">No traders matched your search. Try a different keyword or browse categories.</div>
+      )}
       <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
         {recs.map(item => (
           <div key={item.provider.id} className="border rounded-2xl p-4 flex flex-col gap-3">
@@ -67,16 +130,36 @@ export default function ResultsPage(){
                 <Badge className="border-gray-300 text-gray-700">Match {Math.round(item.score)}</Badge>
               </div>
             </div>
-            {item.listings[0] && (
-              <div className="text-sm text-gray-700">
-                <div className="font-medium">Sample: {item.listings[0].title}</div>
-                <div className="text-gray-600">Starting at {currency(item.listings[0].price)}</div>
-                <div className="flex flex-wrap gap-2 mt-2">{item.listings[0].tags.map(t => <Pill key={t}>{t}</Pill>)}</div>
-              </div>
+            {item.provider.bio && (
+              <div className="text-sm text-gray-600">{item.provider.bio}</div>
             )}
-            {item.provider.hourlyRate > 0 && (
-              <div className="text-xs text-gray-600">Hourly from ${Number(item.provider.hourlyRate).toFixed(0)}</div>
-            )}
+            <div className="flex flex-wrap gap-3 text-xs text-gray-500">
+              {item.provider.hourlyRate > 0 && <span>💵 ${Number(item.provider.hourlyRate).toFixed(0)}/hr</span>}
+              {Number(item.provider.experienceYears)>0 && <span>🛠 {Number(item.provider.experienceYears)} yrs experience</span>}
+              {item.provider.availability && <span>🗓 {item.provider.availability}</span>}
+            </div>
+            {(() => {
+              const raw = item.provider.specialties;
+              const arr = Array.isArray(raw) ? raw : String(raw || '').split(',').map(s => s.trim()).filter(Boolean);
+              if (arr.length === 0) return null;
+              return (
+                <div className="flex flex-wrap gap-2">
+                  {arr.slice(0, 4).map(s => <Pill key={s}>{s}</Pill>)}
+                </div>
+              );
+            })()}
+            {(() => {
+              const featured = item.listings.find(l => q && String(l.title || '').toLowerCase().includes(q.toLowerCase())) || item.listings[0];
+              if (!featured) return <div className="text-sm text-gray-500">No active listings yet.</div>;
+              const tags = Array.isArray(featured.tags) ? featured.tags : String(featured.tags || '').split(',').map(t => t.trim()).filter(Boolean);
+              return (
+                <div className="text-sm text-gray-700">
+                  <div className="font-medium">Sample: {featured.title}</div>
+                  <div className="text-gray-600">Starting at {currency(featured.price || 0)}</div>
+                  <div className="flex flex-wrap gap-2 mt-2">{tags.map(t => <Pill key={t}>{t}</Pill>)}</div>
+                </div>
+              );
+            })()}
             <div className="flex items-center justify-between">
               <div className="text-xs text-gray-500">{item.listings.length} offering(s)</div>
               <Button onClick={() => navigate(`/provider/${item.provider.id}?selected=${encodeURIComponent(item.listings?.[0]?.id||'')}`)}>View details</Button>

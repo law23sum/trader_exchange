@@ -1,11 +1,19 @@
 package com.tradeexchange.api;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.tradeexchange.api.dto.TraderProfileRequest;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.*;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.time.Instant;
+import java.util.Base64;
 import java.util.Map;
 
 @RestController
@@ -13,24 +21,88 @@ import java.util.Map;
 public class TraderProfileController {
 
   private final JdbcTemplate jdbc;
+  private final String jwtSecret;
+  private final ObjectMapper mapper = new ObjectMapper();
 
-  public TraderProfileController(JdbcTemplate jdbc) {
+  public TraderProfileController(JdbcTemplate jdbc, @Value("${app.jwt.secret:dev-secret}") String jwtSecret) {
     this.jdbc = jdbc;
+    this.jwtSecret = (jwtSecret != null && !jwtSecret.isBlank()) ? jwtSecret : "dev-secret";
   }
 
   record AuthedUser(String id, String name, String email, String role, String providerPlayerId) {}
 
   private AuthedUser auth(String authorization){
     if (authorization == null || !authorization.startsWith("Bearer ")) return null;
-    String token = authorization.substring(7);
+    String token = authorization.substring(7).trim();
+    if (token.isEmpty()) return null;
+    Map<String, Object> payload = decodeJwt(token);
+    if (payload == null) return null;
+    String userId = stringValue(payload.get("sub"));
+    String email = stringValue(payload.get("email"));
+    AuthedUser user = lookupUser(userId, email);
+    if (user != null) return user;
+    return null;
+  }
+
+  private AuthedUser lookupUser(String id, String email){
     try{
-      return jdbc.query(
-        "SELECT users.id, users.name, users.email, users.role, users.providerPlayerId " +
-        "FROM sessions JOIN users ON users.id=sessions.userId WHERE sessions.token=?",
-        ps -> ps.setString(1, token),
-        rs -> rs.next() ? new AuthedUser(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4), rs.getString(5)) : null
-      );
-    }catch(Exception e){ return null; }
+      if (id != null && !id.isBlank()){
+        AuthedUser u = jdbc.query(
+          "SELECT id,name,email,role,providerPlayerId FROM users WHERE id=?",
+          ps -> ps.setString(1, id),
+          rs -> rs.next() ? new AuthedUser(rs.getString("id"), rs.getString("name"), rs.getString("email"), rs.getString("role"), rs.getString("providerPlayerId")) : null
+        );
+        if (u != null) return normalizeRole(u);
+      }
+    }catch(Exception ignored){}
+    try{
+      if (email != null && !email.isBlank()){
+        AuthedUser u = jdbc.query(
+          "SELECT id,name,email,role,providerPlayerId FROM users WHERE lower(email)=lower(?)",
+          ps -> ps.setString(1, email),
+          rs -> rs.next() ? new AuthedUser(rs.getString("id"), rs.getString("name"), rs.getString("email"), rs.getString("role"), rs.getString("providerPlayerId")) : null
+        );
+        if (u != null) return normalizeRole(u);
+      }
+    }catch(Exception ignored){}
+    return null;
+  }
+
+  private AuthedUser normalizeRole(AuthedUser user){
+    if (user == null) return null;
+    String role = user.role() != null ? user.role().toUpperCase() : null;
+    return new AuthedUser(user.id(), user.name(), user.email(), role, user.providerPlayerId());
+  }
+
+  private Map<String, Object> decodeJwt(String token){
+    try{
+      String[] parts = token.split("\\.");
+      if (parts.length != 3) return null;
+      Mac mac = Mac.getInstance("HmacSHA256");
+      mac.init(new SecretKeySpec(jwtSecret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+      byte[] signature = mac.doFinal((parts[0] + "." + parts[1]).getBytes(StandardCharsets.UTF_8));
+      String expected = Base64.getUrlEncoder().withoutPadding().encodeToString(signature);
+      if (!MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8), parts[2].getBytes(StandardCharsets.UTF_8))) return null;
+      byte[] payloadBytes = Base64.getUrlDecoder().decode(parts[1]);
+      @SuppressWarnings("unchecked")
+      Map<String, Object> payload = mapper.readValue(payloadBytes, Map.class);
+      Object exp = payload.get("exp");
+      if (exp instanceof Number num){
+        if (Instant.now().getEpochSecond() > num.longValue()) return null;
+      } else if (exp instanceof String str && !str.isBlank()){
+        long ts = Long.parseLong(str.trim());
+        if (Instant.now().getEpochSecond() > ts) return null;
+      }
+      return payload;
+    }catch(Exception e){
+      return null;
+    }
+  }
+
+  private String stringValue(Object value){
+    if (value == null) return null;
+    String s = String.valueOf(value);
+    return s != null && !s.isBlank() ? s : null;
   }
 
   @GetMapping("/profile")
@@ -132,9 +204,16 @@ public class TraderProfileController {
     }
   }
 
-  private Object nz(Object o){
-    if (o == null) return (o instanceof Number) ? 0 : "";
-    return o;
+  private String nz(String value){
+    return value != null ? value : "";
+  }
+
+  private double nz(Double value){
+    return value != null ? value : 0.0;
+  }
+
+  private int nz(Integer value){
+    return value != null ? value : 0;
   }
   private int b(Boolean v){ return Boolean.TRUE.equals(v) ? 1 : 0; }
 }
