@@ -1,0 +1,13 @@
+server:
+  port: 8080
+
+app:
+  sqlite:
+    path: ${APP_SQLITE_PATH:trade.db}
+  jwt:
+    secret: ${JWT_SECRET:dev-secret}
+
+spring:
+  jackson:
+    serialization:
+      WRITE_DATES_AS_TIMESTAMPS: false
