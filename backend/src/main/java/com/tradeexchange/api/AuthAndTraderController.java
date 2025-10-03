@@ -1,5 +1,8 @@
 package com.tradeexchange.api;
 
+import com.tradeexchange.common.PasswordService;
+import com.tradeexchange.common.SessionResolver;
+import com.tradeexchange.common.SessionResolver.UserSession;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -13,7 +16,13 @@ import java.util.*;
 public class AuthAndTraderController {
 
   private final JdbcTemplate jdbc;
-  public AuthAndTraderController(JdbcTemplate jdbc){ this.jdbc = jdbc; }
+  private final PasswordService passwords;
+  private final SessionResolver sessions;
+  public AuthAndTraderController(JdbcTemplate jdbc, PasswordService passwords, SessionResolver sessions){
+    this.jdbc = jdbc;
+    this.passwords = passwords;
+    this.sessions = sessions;
+  }
 
   static String rid(){ return UUID.randomUUID().toString().replace("-"," ").trim().replace(" ","").substring(0,12); }
 
@@ -24,26 +33,55 @@ public class AuthAndTraderController {
   @PostMapping("/signup")
   public ResponseEntity<?> signup(@RequestBody SignRequest req){
     try{
-      String email = Optional.ofNullable(req.email()).orElse("").trim().toLowerCase();
+      String email = Optional.ofNullable(req.email()).map(String::trim).map(String::toLowerCase).orElse("");
       if (email.isEmpty()) return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(Map.of("error","Email required"));
-      // Ensure table
-      jdbc.execute("CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, name TEXT, email TEXT UNIQUE, role TEXT, providerPlayerId TEXT)");
-      jdbc.execute("CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, userId TEXT)");
-      List<Map<String,Object>> found = jdbc.query("SELECT id,name,email,role,providerPlayerId FROM users WHERE email=?", ps -> ps.setString(1,email), rs -> {
-        List<Map<String,Object>> out = new ArrayList<>(); if (rs.next()){ out.add(Map.of("id",rs.getString(1),"name",rs.getString(2),"email",rs.getString(3),"role",rs.getString(4),"providerPlayerId",rs.getString(5))); } return out; });
+      String password = Optional.ofNullable(req.password()).orElse("");
+      if (password.isBlank()) return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(Map.of("error","Password required"));
+      String name = Optional.ofNullable(req.name()).filter(s -> !s.isBlank()).orElseGet(() -> email.contains("@") ? email.substring(0, email.indexOf('@')) : email);
+      String role = Optional.ofNullable(req.role()).orElse("USER").trim().toUpperCase(Locale.ROOT);
+      String now = Instant.now().toString();
+
+      Map<String,Object> existing = jdbc.query(
+        "SELECT id, providerPlayerId FROM users WHERE lower(email)=lower(?)",
+        ps -> ps.setString(1, email),
+        rs -> {
+          if (!rs.next()) return null;
+          Map<String,Object> row = new HashMap<>();
+          row.put("id", rs.getString("id"));
+          row.put("providerPlayerId", rs.getString("providerPlayerId"));
+          return row;
+        }
+      );
+
       String id;
-      String name = Optional.ofNullable(req.name()).orElse(email.split("@")[0]);
-      String role = Optional.ofNullable(req.role()).orElse("USER").toUpperCase();
-      if (found.isEmpty()){
+      String providerId = null;
+      String hash = passwords.hashPassword(password);
+      if (existing == null) {
         id = rid();
-        jdbc.update("INSERT INTO users (id,name,email,role) VALUES (?,?,?,?)", id, name, email, role);
+        jdbc.update(
+          "INSERT INTO users (id,name,email,password,role,createdAt) VALUES (?,?,?,?,?,?)",
+          id, name, email, hash, role, now
+        );
       } else {
-        id = String.valueOf(found.get(0).get("id"));
-        jdbc.update("UPDATE users SET name=?, role=? WHERE id=?", name, role, id);
+        id = String.valueOf(existing.get("id"));
+        providerId = (String) existing.get("providerPlayerId");
+        jdbc.update(
+          "UPDATE users SET name=?, role=?, password=?, createdAt=COALESCE(createdAt, ?) WHERE id=?",
+          name, role, hash, now, id
+        );
       }
-      String token = UUID.randomUUID().toString().substring(0,16);
+
+      String token = randomToken();
       jdbc.update("INSERT OR REPLACE INTO sessions (token,userId) VALUES (?,?)", token, id);
-      Map<String,Object> user = new LinkedHashMap<>(); user.put("id", id); user.put("name", name); user.put("email", email); user.put("role", role);
+      Map<String,Object> user = loadUser(id);
+      if (user == null) {
+        user = new LinkedHashMap<>();
+        user.put("id", id);
+        user.put("name", name);
+        user.put("email", email);
+        user.put("role", role);
+        user.put("providerPlayerId", providerId);
+      }
       return ResponseEntity.ok(Map.of("token", token, "user", user));
     }catch(Exception e){ return ResponseEntity.status(500).body(Map.of("error","Signup failed")); }
   }
@@ -51,61 +89,114 @@ public class AuthAndTraderController {
   @PostMapping("/signin")
   public ResponseEntity<?> signin(@RequestBody SignInRequest req){
     try{
-      String email = Optional.ofNullable(req.email()).orElse("").trim().toLowerCase();
-      if (email.isEmpty()) return ResponseEntity.status(400).body(Map.of("error","Email required"));
-      List<Map<String,Object>> row = jdbc.query("SELECT id,name,email,role,providerPlayerId FROM users WHERE email=?", ps -> ps.setString(1,email), rs -> {
-        List<Map<String,Object>> out = new ArrayList<>(); if (rs.next()){ out.add(Map.of("id",rs.getString(1),"name",rs.getString(2),"email",rs.getString(3),"role",rs.getString(4),"providerPlayerId",rs.getString(5))); } return out; });
-      if (row.isEmpty()) return ResponseEntity.status(401).body(Map.of("error","Invalid credentials"));
-      String id = String.valueOf(row.get(0).get("id"));
-      String token = UUID.randomUUID().toString().substring(0,16);
-      jdbc.execute("CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, userId TEXT)");
+      String email = Optional.ofNullable(req.email()).map(String::trim).map(String::toLowerCase).orElse("");
+      if (email.isEmpty()) return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(Map.of("error","Email required"));
+      String attempt = Optional.ofNullable(req.password()).orElse("");
+
+      Map<String,Object> row = jdbc.query(
+        "SELECT id,name,email,role,providerPlayerId,password FROM users WHERE lower(email)=lower(?)",
+        ps -> ps.setString(1, email),
+        rs -> {
+          if (!rs.next()) return null;
+          Map<String,Object> map = new LinkedHashMap<>();
+          map.put("id", rs.getString("id"));
+          map.put("name", rs.getString("name"));
+          map.put("email", rs.getString("email"));
+          map.put("role", rs.getString("role"));
+          map.put("providerPlayerId", rs.getString("providerPlayerId"));
+          map.put("password", rs.getString("password"));
+          return map;
+        }
+      );
+      if (row == null) return ResponseEntity.status(401).body(Map.of("error","Invalid credentials"));
+
+      String stored = (String) row.remove("password");
+      if (!passwords.verifyPassword(stored, attempt)){
+        return ResponseEntity.status(401).body(Map.of("error","Invalid credentials"));
+      }
+
+      String id = String.valueOf(row.get("id"));
+      String token = randomToken();
       jdbc.update("INSERT OR REPLACE INTO sessions (token,userId) VALUES (?,?)", token, id);
-      return ResponseEntity.ok(Map.of("token", token, "user", row.get(0)));
+      Map<String,Object> user = loadUser(id);
+      if (user == null) user = row;
+      return ResponseEntity.ok(Map.of("token", token, "user", user));
     }catch(Exception e){ return ResponseEntity.status(500).body(Map.of("error","Signin failed")); }
   }
 
   @PostMapping("/signout")
   public ResponseEntity<?> signout(@RequestHeader(value="Authorization", required=false) String auth){
-    try{ String t = (auth!=null && auth.startsWith("Bearer "))? auth.substring(7):""; if (!t.isEmpty()) jdbc.update("DELETE FROM sessions WHERE token=?", t); }catch(Exception ignore){}
+    try{
+      String token = sessions.extractToken(auth);
+      if (!token.isEmpty()){
+        jdbc.update("DELETE FROM sessions WHERE token=?", token);
+      }
+    }catch(Exception ignore){}
     return ResponseEntity.ok(Map.of("ok", true));
   }
 
   @GetMapping("/me")
   public ResponseEntity<?> me(@RequestHeader(value="Authorization", required=false) String auth){
-    if (auth==null || !auth.startsWith("Bearer ")) return ResponseEntity.status(401).body(Map.of("error","No token"));
-    String t = auth.substring(7);
-    try{
-      Map<String,Object> u = jdbc.query(
-        "SELECT users.id, users.name, users.email, users.role, users.providerPlayerId FROM sessions JOIN users ON users.id=sessions.userId WHERE sessions.token=?",
-        ps -> ps.setString(1,t), rs -> {
-          if (!rs.next()) return null; return Map.of("id", rs.getString(1), "name", rs.getString(2), "email", rs.getString(3), "role", rs.getString(4), "providerPlayerId", rs.getString(5));
-        }
-      );
-      if (u==null) return ResponseEntity.status(401).body(Map.of("error","Invalid token"));
-      return ResponseEntity.ok(u);
-    }catch(Exception e){ return ResponseEntity.status(401).body(Map.of("error","Invalid token")); }
+    Optional<UserSession> session = sessions.fromAuthorization(auth);
+    if (session.isEmpty()) {
+      return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("error","Invalid token"));
+    }
+    Map<String,Object> user = loadUser(session.get().id());
+    if (user == null) {
+      return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("error","Invalid token"));
+    }
+    return ResponseEntity.ok(user);
   }
 
   @PostMapping("/become-provider")
   public ResponseEntity<?> becomeProvider(@RequestHeader(value="Authorization", required=false) String auth){
-    if (auth==null || !auth.startsWith("Bearer ")) return ResponseEntity.status(401).body(Map.of("error","No token"));
-    String t = auth.substring(7);
+    Optional<UserSession> session = sessions.fromAuthorization(auth);
+    if (session.isEmpty()) return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("error","Invalid token"));
     try{
-      Map<String,Object> u = jdbc.query("SELECT users.id, users.name, users.email, users.role, users.providerPlayerId FROM sessions JOIN users ON users.id=sessions.userId WHERE sessions.token=?",
-        ps -> ps.setString(1,t), rs -> { if (!rs.next()) return null; return Map.of("id", rs.getString(1), "name", rs.getString(2), "email", rs.getString(3), "role", rs.getString(4), "providerPlayerId", rs.getString(5)); });
-      if (u==null) return ResponseEntity.status(401).body(Map.of("error","Invalid token"));
-      String uid = String.valueOf(u.get("id"));
-      String pid = (String)u.get("providerPlayerId");
-      if (pid==null || pid.isBlank()){
+      UserSession user = session.get();
+      String uid = user.id();
+      String pid = user.providerPlayerId();
+      if (pid == null || pid.isBlank()){
         pid = rid();
-        jdbc.update("INSERT INTO players (id,name,role,rating,jobs,bio) VALUES (?,?,?,?,?,?)", pid, String.valueOf(u.get("name")), "PROVIDER", 5.0, 0, "");
-        jdbc.update("UPDATE users SET role='TRADER', providerPlayerId=? WHERE id=?", pid, uid);
-      } else {
-        jdbc.update("UPDATE users SET role='TRADER' WHERE id=?", uid);
+        jdbc.update("INSERT INTO players (id,name,role,rating,jobs,bio) VALUES (?,?,?,?,?,?)",
+          pid,
+          Optional.ofNullable(user.name()).orElse("Trader"),
+          "PROVIDER",
+          5.0,
+          0,
+          ""
+        );
       }
-      Map<String,Object> resp = new LinkedHashMap<>(); resp.put("ok", true); resp.put("user", Map.of("id", uid, "name", u.get("name"), "email", u.get("email"), "role", "TRADER", "providerPlayerId", pid)); resp.put("providerId", pid);
+      jdbc.update("UPDATE users SET role='TRADER', providerPlayerId=? WHERE id=?", pid, uid);
+      Map<String,Object> updated = loadUser(uid);
+      Map<String,Object> resp = new LinkedHashMap<>();
+      resp.put("ok", true);
+      resp.put("user", updated);
+      resp.put("providerId", pid);
       return ResponseEntity.ok(resp);
     }catch(Exception e){ return ResponseEntity.status(500).body(Map.of("error","Failed")); }
+  }
+
+  private Map<String,Object> loadUser(String id){
+    if (id == null || id.isBlank()) return null;
+    return jdbc.query(
+      "SELECT id,name,email,role,providerPlayerId FROM users WHERE id=?",
+      ps -> ps.setString(1, id),
+      rs -> {
+        if (!rs.next()) return null;
+        Map<String,Object> map = new LinkedHashMap<>();
+        map.put("id", rs.getString("id"));
+        map.put("name", Optional.ofNullable(rs.getString("name")).orElse(""));
+        map.put("email", Optional.ofNullable(rs.getString("email")).orElse(""));
+        map.put("role", Optional.ofNullable(rs.getString("role")).orElse("USER").toUpperCase(Locale.ROOT));
+        map.put("providerPlayerId", rs.getString("providerPlayerId"));
+        return map;
+      }
+    );
+  }
+
+  private String randomToken(){
+    return UUID.randomUUID().toString().replace("-", "").substring(0, 24);
   }
 
   // ---- Trader listings CRUD ----
@@ -178,4 +269,3 @@ public class AuthAndTraderController {
     return ResponseEntity.ok(Map.of("ok", true));
   }
 }
-
