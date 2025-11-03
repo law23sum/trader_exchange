@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
-import { Badge, Pill, Button, PlayerBadge, currency } from '../components/ui.js'
+import { Badge, Pill, Button, PlayerBadge, Input, currency } from '../components/ui.js'
+import { JourneyStepper } from '../components/JourneyStepper.jsx'
 
 function scoreProviderForQuery(provider, listings, query){
   const q = (query||'').toLowerCase().trim();
@@ -103,70 +104,82 @@ export default function ResultsPage(){
   }, [players, listings, searchProviders, searchListings, q]);
 
   return (
-    <main className="max-w-6xl mx-auto px-4 py-6">
-      <div className="mb-5">
-        <form onSubmit={(e)=>{ e.preventDefault(); navigate(`/results?q=${encodeURIComponent(searchQ)}`) }} className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full max-w-xl">
-          <input className="w-full px-4 py-3 rounded-2xl border border-gray-300 focus:outline-none focus:ring-2 focus:ring-black/20" value={searchQ} onChange={e=>setSearchQ(e.target.value)} placeholder="Search services or categories" />
-          <button className="px-4 py-3 rounded-2xl bg-black text-white border border-black w-full sm:w-auto">Search</button>
+    <main className="tx-container py-10 space-y-8">
+      <JourneyStepper stage="discover" />
+      <div className="mx-auto max-w-3xl">
+        <form
+          onSubmit={(e)=>{ e.preventDefault(); navigate(`/results?q=${encodeURIComponent(searchQ)}`) }}
+          className="flex flex-col items-stretch gap-3 sm:flex-row"
+        >
+          <Input value={searchQ} onChange={setSearchQ} placeholder="Search services or categories" />
+          <Button className="w-full sm:w-auto" type="submit">Search</Button>
         </form>
       </div>
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="text-xl font-semibold">{q ? `Results for “${q}”` : 'Recommended traders'}</h2>
-        <div className="text-sm text-gray-500">{recs.length} {recs.length === 1 ? 'match' : 'matches'}</div>
-      </div>
-      {q && searchLoading && (
-        <div className="text-sm text-gray-500 mb-3">Searching providers…</div>
-      )}
-      {q && !searchLoading && searchFetched && recs.length === 0 && (
-        <div className="text-sm text-gray-500 mb-3">No traders matched your search. Try a different keyword or browse categories.</div>
-      )}
-      <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {recs.map(item => (
-          <div key={item.provider.id} className="border rounded-2xl p-4 flex flex-col gap-3">
-            <div className="flex items-start justify-between">
-              <PlayerBadge player={item.provider} />
-              <div className="text-right">
-                {item.provider.location && <div className="text-xs text-gray-500">{item.provider.location}</div>}
-                <Badge className="border-gray-300 text-gray-700">Match {Math.round(item.score)}</Badge>
-              </div>
-            </div>
-            {item.provider.bio && (
-              <div className="text-sm text-gray-600">{item.provider.bio}</div>
-            )}
-            <div className="flex flex-wrap gap-3 text-xs text-gray-500">
-              {item.provider.hourlyRate > 0 && <span>💵 ${Number(item.provider.hourlyRate).toFixed(0)}/hr</span>}
-              {Number(item.provider.experienceYears)>0 && <span>🛠 {Number(item.provider.experienceYears)} yrs experience</span>}
-              {item.provider.availability && <span>🗓 {item.provider.availability}</span>}
-            </div>
-            {(() => {
-              const raw = item.provider.specialties;
-              const arr = Array.isArray(raw) ? raw : String(raw || '').split(',').map(s => s.trim()).filter(Boolean);
-              if (arr.length === 0) return null;
-              return (
-                <div className="flex flex-wrap gap-2">
-                  {arr.slice(0, 4).map(s => <Pill key={s}>{s}</Pill>)}
-                </div>
-              );
-            })()}
-            {(() => {
-              const featured = item.listings.find(l => q && String(l.title || '').toLowerCase().includes(q.toLowerCase())) || item.listings[0];
-              if (!featured) return <div className="text-sm text-gray-500">No active listings yet.</div>;
-              const tags = Array.isArray(featured.tags) ? featured.tags : String(featured.tags || '').split(',').map(t => t.trim()).filter(Boolean);
-              return (
-                <div className="text-sm text-gray-700">
-                  <div className="font-medium">Sample: {featured.title}</div>
-                  <div className="text-gray-600">Starting at {currency(featured.price || 0)}</div>
-                  <div className="flex flex-wrap gap-2 mt-2">{tags.map(t => <Pill key={t}>{t}</Pill>)}</div>
-                </div>
-              );
-            })()}
-            <div className="flex items-center justify-between">
-              <div className="text-xs text-gray-500">{item.listings.length} offering(s)</div>
-              <Button onClick={() => navigate(`/provider/${item.provider.id}?selected=${encodeURIComponent(item.listings?.[0]?.id||'')}`)}>View details</Button>
-            </div>
+
+      <section className="space-y-6">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2>{q ? `Results for “${q}”` : 'Recommended traders'}</h2>
+          <div className="text-sm font-medium text-gray-500">{recs.length} {recs.length === 1 ? 'match' : 'matches'}</div>
+        </div>
+        {q && searchLoading && (
+          <div className="rounded-xl border border-dashed border-gray-300 bg-white/70 px-4 py-3 text-sm text-gray-600">Searching providers…</div>
+        )}
+        {q && !searchLoading && searchFetched && recs.length === 0 && (
+          <div className="rounded-xl border border-dashed border-gray-300 bg-white/70 px-4 py-3 text-sm text-gray-600">
+            No traders matched your search. Try a different keyword or browse categories.
           </div>
-        ))}
-      </div>
+        )}
+        <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
+          {recs.map(item => (
+            <article key={item.provider.id} className="tx-card flex h-full flex-col gap-5 p-5">
+              <div className="flex items-start justify-between gap-4">
+                <PlayerBadge player={item.provider} />
+                <div className="text-right">
+                  {item.provider.location && <div className="text-xs font-medium uppercase tracking-wide text-gray-400">{item.provider.location}</div>}
+                  <Badge className="mt-1 border-gray-200 text-gray-600">Match {Math.round(item.score)}</Badge>
+                </div>
+              </div>
+              {item.provider.bio && (
+                <p className="text-sm text-gray-600">{item.provider.bio}</p>
+              )}
+              <div className="flex flex-wrap items-center gap-3 text-xs font-medium text-gray-500">
+                {item.provider.hourlyRate > 0 && <span>💵 ${Number(item.provider.hourlyRate).toFixed(0)}/hr</span>}
+                {Number(item.provider.experienceYears)>0 && <span>🛠 {Number(item.provider.experienceYears)} yrs experience</span>}
+                {item.provider.availability && <span>🗓 {item.provider.availability}</span>}
+              </div>
+              {(() => {
+                const raw = item.provider.specialties;
+                const arr = Array.isArray(raw) ? raw : String(raw || '').split(',').map(s => s.trim()).filter(Boolean);
+                if (arr.length === 0) return null;
+                return (
+                  <div className="flex flex-wrap gap-2">
+                    {arr.slice(0, 4).map(s => <Pill key={s}>{s}</Pill>)}
+                  </div>
+                );
+              })()}
+              {(() => {
+                const featured = item.listings.find(l => q && String(l.title || '').toLowerCase().includes(q.toLowerCase())) || item.listings[0];
+                if (!featured) return <div className="text-sm text-gray-500">No active listings yet.</div>;
+                const tags = Array.isArray(featured.tags) ? featured.tags : String(featured.tags || '').split(',').map(t => t.trim()).filter(Boolean);
+                return (
+                  <div className="space-y-2 text-sm text-gray-700">
+                    <div className="font-semibold text-gray-900">{featured.title}</div>
+                    <div className="text-sm text-gray-500">Starting at {currency(featured.price || 0)}</div>
+                    <div className="flex flex-wrap gap-2">{tags.map(t => <Pill key={t}>{t}</Pill>)}</div>
+                  </div>
+                );
+              })()}
+              <div className="flex flex-wrap items-center justify-between gap-2 border-t border-gray-100 pt-4">
+                <div className="text-xs font-medium uppercase tracking-wide text-gray-400">{item.listings.length} offering(s)</div>
+                <div className="flex flex-wrap gap-2">
+                  <Button variant="subtle" onClick={() => navigate(`/provider/${item.provider.id}?selected=${encodeURIComponent(item.listings?.[0]?.id||'')}&consult=1`)}>Schedule consult</Button>
+                  <Button onClick={() => navigate(`/provider/${item.provider.id}?selected=${encodeURIComponent(item.listings?.[0]?.id||'')}`)}>View details</Button>
+                </div>
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
     </main>
   )
 }

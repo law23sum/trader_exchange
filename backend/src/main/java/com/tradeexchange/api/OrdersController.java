@@ -91,6 +91,16 @@ public class OrdersController {
       id
     );
 
+    if ("complete".equals(map.get(a))) {
+      // increment trader jobs count when an order is completed
+      try{
+        var provider = jdbc.query("SELECT providerId FROM orders WHERE id=?", ps -> ps.setString(1,id), rs -> rs.next() ? rs.getString(1) : null);
+        if (provider != null && !provider.isBlank()){
+          jdbc.update("UPDATE players SET jobs = COALESCE(jobs,0)+1 WHERE id=?", provider);
+        }
+      }catch(Exception ignore){}
+    }
+
     var row = jdbc.query("SELECT id,userName,service,status,amount,createdAt,providerId,listingId,conversationId,reqDetails,reqDate,reqTime,reqAck FROM orders WHERE id=?",
       ps -> ps.setString(1,id),
       rs -> {
@@ -116,6 +126,70 @@ public class OrdersController {
     );
     if (row==null) return ResponseEntity.status(404).body(Map.of("message","Order not found"));
     return ResponseEntity.ok(Map.of("ok",true, "order", row));
+  }
+
+  // --- User schedules a consultation before purchasing (optional) ---
+  public record ScheduleConsultation(String conversationId, String date, String time){ }
+  @PostMapping("/orders/{id}/schedule-consultation")
+  public ResponseEntity<?> scheduleConsultation(@PathVariable String id, @RequestHeader(value = "Authorization", required = false) String authz, @RequestBody ScheduleConsultation req){
+    Optional<UserSession> session = sessions.fromAuthorization(authz);
+    if (session.isEmpty()) return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("error", "No token"));
+    jdbc.update("UPDATE orders SET reqDate=?, reqTime=?, conversationId=COALESCE(?, conversationId) WHERE id=?",
+      Optional.ofNullable(req.date()).orElse(""),
+      Optional.ofNullable(req.time()).orElse(""),
+      Optional.ofNullable(req.conversationId()).orElse(null),
+      id
+    );
+    return ResponseEntity.ok(Map.of("ok", true));
+  }
+
+  // --- Trader marks service completed and shares completion details with customer ---
+  public record CompletionDetails(String notes, String photoUrl){ }
+  @PostMapping("/trader/orders/{id}/complete-with-details")
+  public ResponseEntity<?> completeWithDetails(@PathVariable String id, @RequestHeader(value = "Authorization", required = false) String authz, @RequestBody CompletionDetails req){
+    Optional<UserSession> session = sessions.fromAuthorization(authz);
+    if (session.isEmpty()) return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("error", "No token"));
+    UserSession user = session.get();
+    if (!"TRADER".equalsIgnoreCase(user.role()) && !"ADMIN".equalsIgnoreCase(user.role())) return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", "Forbidden"));
+    String appendix = String.join("\n", java.util.stream.Stream.of(
+      Optional.ofNullable(req.notes()).filter(s->!s.isBlank()).map(s->"Completion notes: "+s).orElse(null),
+      Optional.ofNullable(req.photoUrl()).filter(s->!s.isBlank()).map(s->"Photo: "+s).orElse(null)
+    ).filter(java.util.Objects::nonNull).toList());
+    if (!appendix.isBlank()){
+      jdbc.update("UPDATE orders SET reqDetails=TRIM(COALESCE(reqDetails,'') || CASE WHEN ?<>'' THEN char(10)||? ELSE '' END) WHERE id=?",
+        appendix,
+        appendix,
+        id
+      );
+    }
+    jdbc.update("UPDATE orders SET status='complete' WHERE id=?", id);
+    try{
+      var provider = jdbc.query("SELECT providerId FROM orders WHERE id=?", ps -> ps.setString(1,id), rs -> rs.next() ? rs.getString(1) : null);
+      if (provider != null && !provider.isBlank()){
+        jdbc.update("UPDATE players SET jobs = COALESCE(jobs,0)+1 WHERE id=?", provider);
+      }
+    }catch(Exception ignore){}
+    return ResponseEntity.ok(Map.of("ok", true));
+  }
+
+  // --- Users leave a review after completion; update provider average rating ---
+  public record NewReview(Integer rating, String text){ }
+  @PostMapping("/orders/{id}/review")
+  public ResponseEntity<?> leaveReview(@PathVariable String id, @RequestHeader(value = "Authorization", required = false) String authz, @RequestBody NewReview req){
+    Optional<UserSession> session = sessions.fromAuthorization(authz);
+    if (session.isEmpty()) return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("error", "No token"));
+    int rating = Math.max(1, Math.min(5, Optional.ofNullable(req.rating()).orElse(5)));
+    String text = Optional.ofNullable(req.text()).orElse("");
+    String reviewId = UUID.randomUUID().toString().substring(0,8);
+    String now = Instant.now().toString();
+    var provider = jdbc.query("SELECT providerId FROM orders WHERE id=?", ps -> ps.setString(1,id), rs -> rs.next() ? rs.getString(1) : null);
+    if (provider == null || provider.isBlank()) return ResponseEntity.status(404).body(Map.of("message","Order not found"));
+    jdbc.update("INSERT INTO provider_reviews (id,providerId,author,rating,text,at) VALUES (?,?,?,?,?,?)",
+      reviewId, provider, Optional.ofNullable(session.get().name()).orElse("Customer"), rating, text, now);
+    // recompute average rating
+    var avg = jdbc.query("SELECT AVG(rating) FROM provider_reviews WHERE providerId=?", ps -> ps.setString(1, provider), rs -> rs.next() ? rs.getDouble(1) : 0.0);
+    jdbc.update("UPDATE players SET rating=? WHERE id=?", avg, provider);
+    return ResponseEntity.ok(Map.of("ok", true, "reviewId", reviewId, "rating", rating));
   }
 
   public record NewRequest(String providerId, String listingId, String title, String details, String date, String time, String conversationId){}
@@ -191,5 +265,59 @@ public class OrdersController {
     );
     if (row==null) return ResponseEntity.ok(Map.of("ok", true, "found", false, "status", "none", "ack", false));
     return ResponseEntity.ok(row);
+  }
+
+  @GetMapping("/orders/mine")
+  public ResponseEntity<?> myOrders(@RequestHeader(value = "Authorization", required = false) String authz){
+    Optional<UserSession> session = sessions.fromAuthorization(authz);
+    if (session.isEmpty()) return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("error", "No token"));
+    UserSession user = session.get();
+    String name = Optional.ofNullable(user.name()).orElse("").trim();
+    String email = Optional.ofNullable(user.email()).orElse("").trim();
+    List<String> conditions = new ArrayList<>();
+    List<Object> params = new ArrayList<>();
+    if (!name.isBlank()){
+      conditions.add("LOWER(o.userName) = ?");
+      params.add(name.toLowerCase());
+    }
+    if (!email.isBlank()){
+      conditions.add("LOWER(o.userName) = ?");
+      params.add(email.toLowerCase());
+    }
+    if (conditions.isEmpty()){
+      return ResponseEntity.ok(List.of());
+    }
+    String where = String.join(" OR ", conditions);
+    String sql = "SELECT o.id, o.service, o.status, o.amount, o.createdAt, o.providerId, o.listingId, o.conversationId, o.reqDetails, o.reqDate, o.reqTime, o.reqAck, p.name AS providerName " +
+      "FROM orders o LEFT JOIN players p ON p.id = o.providerId WHERE " + where + " ORDER BY o.createdAt DESC";
+    List<Map<String,Object>> rows = jdbc.query(sql,
+      ps -> {
+        for (int i = 0; i < params.size(); i++) ps.setObject(i + 1, params.get(i));
+      },
+      rs -> {
+        List<Map<String,Object>> out = new ArrayList<>();
+        while (rs.next()){
+          Map<String,Object> m = new LinkedHashMap<>();
+          m.put("id", rs.getString("id"));
+          m.put("service", rs.getString("service"));
+          m.put("status", rs.getString("status"));
+          m.put("amount", rs.getObject("amount"));
+          m.put("createdAt", rs.getString("createdAt"));
+          m.put("providerId", rs.getString("providerId"));
+          m.put("listingId", rs.getString("listingId"));
+          m.put("conversationId", rs.getString("conversationId"));
+          m.put("providerName", Optional.ofNullable(rs.getString("providerName")).orElse("Trader"));
+          Map<String,Object> req = new LinkedHashMap<>();
+          req.put("details", rs.getString("reqDetails"));
+          req.put("date", rs.getString("reqDate"));
+          req.put("time", rs.getString("reqTime"));
+          req.put("ack", rs.getInt("reqAck") != 0);
+          m.put("request", req);
+          out.add(m);
+        }
+        return out;
+      }
+    );
+    return ResponseEntity.ok(rows);
   }
 }

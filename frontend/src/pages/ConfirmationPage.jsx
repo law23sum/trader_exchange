@@ -74,6 +74,10 @@ export default function ConfirmationPage(){
       </div>
 
       <div className="text-xs text-gray-500 mt-6">
+        Prefer to prefill your info first? <Link to={`/customer-details?next=${encodeURIComponent(`/confirm/${listingId}/${providerId}/${price}`)}`} className="underline">Add customer details</Link>.
+      </div>
+
+      <div className="text-xs text-gray-500 mt-3">
         Looking for something else? <Link to="/results" className="underline">Return to results</Link>.
       </div>
     </main>

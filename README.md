@@ -1,97 +1,133 @@
-# Trade Exchange — Auth + Dashboards
-Now includes Sign in / Sign up and role-based dashboards.
+# Trade Exchange
 
-## Accounts (seeded)
-- user@example.com / password (USER)
-- trader@example.com / password (TRADER)
+Trade Exchange connects customers with vetted traders and walks both sides through a consistent journey: discover → consult → book → deliver → review. The UI and backend in this repo have been tuned to support that end‑to‑end flow.
 
-## Run
-### Backend
-cd backend
-npm i
-npm run seed
-npm run dev   # http://localhost:4000
+## Quick Start
 
-Reset database (delete all data)
-- cd backend && npm run reset-db
-- Optional: re-seed with demo data via `npm run seed`
+| Service  | Command | Notes |
+|----------|---------|-------|
+| **Backend** (Spring Boot) | `cd backend && mvn spring-boot:run` | Requires Java 17+ and Maven. The service uses SQLite (`backend/trade.db`) and auto‑seeds demo data on first run. Listens on `http://localhost:8080`. |
+| **Frontend** (Vite + React) | `cd frontend && npm install && npm run dev` | Requires Node 18+. The dev server proxies API calls to `http://localhost:8080` by default. |
 
-### Frontend
-cd frontend
-npm i
-npm run dev   # http://localhost:5173
+Open `http://localhost:5173` after both services start.
 
-### Mock mode (no backend required)
-If you cannot run the backend locally, you can enable a mock API to sign in and browse demo data:
+### Demo Accounts
 
-Create `frontend/.env.local` with:
+| Role  | Email | Password |
+|-------|-------|----------|
+| Customer | `user@example.com`   | `password` |
+| Trader   | `trader@example.com` | `password` |
+| Milo Provider | `milo@tradeexchange.com` | `password` |
+| Admin (optional) | `admin@example.com` | `password` |
 
+These users are seeded by `DataSeeder` on backend startup. Feel free to sign up additional accounts through the UI; they will be stored in the same SQLite database.
+
+## Environment Configuration
+
+Create `frontend/.env.local` to override defaults:
+
+```ini
+# Point the frontend at a custom backend host/port
+VITE_API_BASE=http://localhost:8080
+
+# Enable mock mode (no backend). Useful for rapid UI work or CI smoke checks.
 VITE_MOCK=1
 
-Then start the frontend. Sign in/up will work entirely in the browser, and core pages will show demo data.
+# Stripe publishable key (required for inline card entry during checkout)
+VITE_STRIPE_PK=pk_test_1234567890
+```
 
-Optional: if your backend runs on a different host/port, set `VITE_API_BASE` to bypass the dev proxy:
+When `VITE_MOCK=1`, sign in/up, search, consultations, orders, and reviews all run against the in‑browser mock defined in `src/mock/api.js`.
 
-Create `frontend/.env.local` with:
+The backend reads its database location from `SPRING_DATASOURCE_URL`. To use a different file or an in‑memory database:
 
-VITE_API_BASE=http://127.0.0.1:4001
+```bash
+SPRING_DATASOURCE_URL=jdbc:sqlite:/tmp/trade.db mvn spring-boot:run
+```
 
-Then start the frontend. Auth pages use this base for API requests.
+## Workflow Overview
 
-### Common Pages
-- /about — About Trade Exchange
-- /how-it-works — How the marketplace flow works
-- /pricing — Plans and tiers (demo)
-- /become-a-provider — Provider onboarding CTA
-- /help — Help & FAQ
-- /contact — Contact form (demo)
-- /safety — Trust & safety guidelines
-- /terms — Terms of Service (placeholder)
-- /privacy — Privacy Policy (placeholder)
+1. **Discover** – Customers search (`/results`) with instant metrics. Cards surface “Schedule consult” and “View details”.
+2. **Consult** – Trader detail pages embed messaging and an optional consultation form that records requested date/time and context.
+3. **Book & Pay** – Checkout captures service details, schedules, and contact information, then writes an order via `/api/checkout`.
+4. **Deliver** – Traders manage incoming orders from their dashboard, can approve/discuss, and log completion notes with proof links.
+5. **Review** – Customers see their bookings on `/dashboard/user`, leave ratings, and revisit traders or categories.
 
-### Messaging & AI
-- Backend: Conversations and messages are stored in SQLite. Endpoints:
-  - GET /api/conversations, POST /api/conversations
-  - GET /api/conversations/:id/messages, POST /api/conversations/:id/messages
-  - Simple AI replies for conversations with kind='AI'. Replace logic in `backend/src/ai.js`.
-- Frontend: Routes `/messages` and `/messages/:id` for list + chat.
+The shared `JourneyStepper` component appears on every stage to keep users oriented.
 
-## Java Backend (optional, fullstack alt for trader profile)
-You can also run a Java Spring Boot service that writes trader profiles into the same SQLite DB used by the Node backend.
+## Debugging & Tooling
 
-### Run Java service
-cd java-backend
-mvn spring-boot:run   # http://localhost:8080
+### Inspecting Data
 
-The service uses the DB at `../backend/trade.db` by default. Configure in `java-backend/src/main/resources/application.yml`.
+- **Orders**: `SELECT * FROM orders;` inside `backend/trade.db`. Use `sqlite3 backend/trade.db` for quick checks.
+- **Users & sessions**: `users`, `sessions`, and `players` tables store auth info and trader metadata.
 
-### Endpoints (parity with Node)
-- GET /api/trader/profile — requires `Authorization: Bearer <token>` (uses `sessions` + `users` tables), returns current provider profile.
-- POST /api/trader/profile — same body as Node; upserts a provider row and links to the user.
+### Useful Backend Commands
 
-### Use from the frontend
-Set a custom API base (to target Java instead of Node):
+```bash
+# Run with verbose SQL logging
+SPRING_JPA_SHOW_SQL=true mvn spring-boot:run
 
-Create `frontend/.env.local` with:
+# Rebuild the project
+mvn clean package
 
-VITE_API_BASE=http://127.0.0.1:8080
+# Execute backend unit tests (if present)
+mvn test
+```
 
-Restart Vite. The app will use the Java endpoints for profile actions while still sharing the same DB.
+Backend logs surface on stdout; look for Spring Boot INFO lines for route registration and data seeding.
 
-### Flow
-- Home page shows Sign in / Sign up.
-- After auth:
-  - USER → /dashboard/user (favorites, history, categories)
-  - TRADER → /dashboard/trader (your listings, tips)
+### Useful Frontend Commands
 
+```bash
+# Type-check (if TypeScript is added in the future)
+npm run typecheck
 
-## Updated flow
-- Home page shows **Sign in / Sign up** cards and popular categories.
-- After **Sign in**:
-  - USER → `/dashboard/user` (favorites, history, categories)
-  - TRADER → `/dashboard/trader` (details + listings)
-- Selecting a tier on a trader leads to **Confirm** → **Checkout**, which records a purchase in history.
+# Production build (used as a smoke test in this repo)
+npm run build
+```
 
+Vite automatically reloads on file changes. If you see stale module errors, restart `npm run dev` to clear the module graph.
 
-### Google login
-This build includes a **demo** Google login button that calls `/api/auth/google` and returns a mock account (`google_user@example.com`). For real OAuth, wire an auth provider and exchange the ID token on the backend.
+## API Highlights
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/checkout` | POST | Records a paid order with schedule, address, tasks, and contact info. Returns `{ orderId, txId }`. |
+| `/api/orders/mine` | GET | Returns orders belonging to the authenticated customer. Powers the user dashboard. |
+| `/api/orders/{id}/review` | POST | Stores a review and recomputes the provider rating. |
+| `/api/trader/orders` | GET | Lists orders scoped to the trader’s provider ID. |
+| `/api/trader/orders/{id}/action` | POST | Allows `approve`, `discuss`, or `complete` actions. |
+| `/api/trader/orders/{id}/complete-with-details` | POST | Adds completion notes/photo links and flags the order complete. |
+
+See `backend/src/main/java/com/tradeexchange/api/OrdersController.java` for the full API surface.
+
+## Adding New Traders or Listings
+
+1. Sign in as a trader and visit `/dashboard/trader`.
+2. Update profile fields and portrait session details – they persist via `/api/trader/profile`.
+3. Use the listings management endpoints (`/api/trader/listings`) to create new offerings (currently callable via API or future admin tooling).
+
+## Mock Mode vs Live Backend
+
+| Capability | Live Backend | Mock Mode |
+|------------|--------------|-----------|
+| Auth & roles | ✅ SQLite-backed | ✅ LocalStorage-backed |
+| Search data | ✅ `/api/players`, `/api/listings` | ✅ in-memory demo data |
+| Consult + orders | ✅ persists to `orders` table | ✅ stored in LocalStorage |
+| Reviews & ratings | ✅ updates `provider_reviews` + `players.rating` | ✅ stored in LocalStorage |
+
+Mock mode is perfect for UI prototyping; switch back to the live backend before final QA to ensure SQLite and server logic behave as expected.
+
+## Testing the Full Flow
+
+1. Start backend & frontend.
+2. Sign in as `user@example.com`.
+3. Search for a trader, schedule a consult, then proceed to checkout and submit.
+4. Sign in as `trader@example.com` (photography) or `milo@tradeexchange.com` (math tutor), approve the new order, add completion notes, and mark complete.
+5. Sign back in as the user, open `/dashboard/user`, locate the booking, and submit a review.
+
+Following those five steps exercises all major endpoints and surfaces issues quickly.
+
+---
+Happy trading! If you run into problems, check the backend logs first (they log seeded data and SQL errors) and verify your frontend `.env.local` matches the running backend host.

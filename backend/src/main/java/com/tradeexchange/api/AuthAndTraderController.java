@@ -262,10 +262,148 @@ public class AuthAndTraderController {
   }
 
   // ---- Checkout endpoint used by frontend ----
-  public record CheckoutRequest(Double amount, String name, String email, String note, String listingId, String providerId){}
+  public record CheckoutRequest(Double amount, String name, String email, String note, String listingId, String providerId, String date, String time, String address, String phone, String tasks){}
   @PostMapping("/checkout")
   public ResponseEntity<?> checkout(@RequestBody CheckoutRequest req){
-    // For now, accept and return ok; frontend handles navigation to chat
-    return ResponseEntity.ok(Map.of("ok", true));
+    // Record an order as paid and include customer details for the trader
+    try{
+      String id = rid();
+      String createdAt = Instant.now().toString();
+      Double amount = Optional.ofNullable(req.amount()).orElse(0.0);
+      String providerId = Optional.ofNullable(req.providerId()).orElse("");
+      String listingId = Optional.ofNullable(req.listingId()).orElse("");
+      String userName = Optional.ofNullable(req.name()).filter(s->!s.isBlank()).orElse(Optional.ofNullable(req.email()).orElse("Customer"));
+      String details = String.join("\n", new String[]{
+        Optional.ofNullable(req.note()).orElse(""),
+        (req.tasks()==null||req.tasks().isBlank()? null : ("Tasks: "+req.tasks())),
+        (req.address()==null||req.address().isBlank()? null : ("Address: "+req.address())),
+        (req.phone()==null||req.phone().isBlank()? null : ("Phone: "+req.phone())),
+      }).replaceAll("^(\n)+|\n+$","");
+      String reqDate = Optional.ofNullable(req.date()).orElse("");
+      String reqTime = Optional.ofNullable(req.time()).orElse("");
+
+      jdbc.update("INSERT INTO orders (id,userName,service,status,amount,createdAt,providerId,listingId,conversationId,reqDetails,reqDate,reqTime,reqAck) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        id,
+        userName,
+        "Service purchase",
+        "approved",
+        amount,
+        createdAt,
+        providerId,
+        listingId,
+        null,
+        details,
+        reqDate,
+        reqTime,
+        1
+      );
+
+      String txId = UUID.randomUUID().toString().replace("-","").substring(0,16);
+      return ResponseEntity.ok(Map.of("ok", true, "orderId", id, "txId", txId));
+    }catch(Exception e){
+      return ResponseEntity.status(500).body(Map.of("error","Checkout failed"));
+    }
+  }
+
+  // --- Stripe: create PaymentIntent and return client_secret ---
+  public record CreatePI(Double amount, String currency){}
+  @PostMapping("/stripe/create-payment-intent")
+  public ResponseEntity<?> createPaymentIntent(@RequestBody CreatePI req){
+    try{
+      String secret = Optional.ofNullable(System.getenv("STRIPE_SECRET")).orElse("");
+      if (secret.isBlank()) return ResponseEntity.status(500).body(Map.of("error","Stripe secret not configured"));
+      int amountCents = (int) Math.max(0, Math.round(Optional.ofNullable(req.amount()).orElse(0.0) * 100));
+      String currency = Optional.ofNullable(req.currency()).orElse("usd");
+
+      java.net.URL url = new java.net.URL("https://api.stripe.com/v1/payment_intents");
+      java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
+      conn.setRequestMethod("POST");
+      conn.setDoOutput(true);
+      conn.setRequestProperty("Authorization", "Bearer " + secret);
+      conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+
+      String body = "amount=" + amountCents + "&currency=" + java.net.URLEncoder.encode(currency, java.nio.charset.StandardCharsets.UTF_8) +
+        "&automatic_payment_methods[enabled]=true";
+      try (java.io.OutputStream os = conn.getOutputStream()){
+        os.write(body.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+      }
+      int code = conn.getResponseCode();
+      java.io.InputStream is = (code >= 200 && code < 300) ? conn.getInputStream() : conn.getErrorStream();
+      String json = new String(is.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+      if (code < 200 || code >= 300){
+        return ResponseEntity.status(500).body(Map.of("error","Stripe error", "details", json));
+      }
+      // naive parse for client_secret and id
+      String clientSecret = extractJson(json, "client_secret");
+      String id = extractJson(json, "id");
+      return ResponseEntity.ok(Map.of("clientSecret", clientSecret, "id", id));
+    }catch(Exception e){
+      return ResponseEntity.status(500).body(Map.of("error","Failed to create payment intent"));
+    }
+  }
+
+  // --- Stripe: create Checkout Session and return url ---
+  public record CreateCheckoutSession(Double amount, String currency, String successUrl, String cancelUrl, Map<String,String> metadata){}
+  @PostMapping("/stripe/create-checkout-session")
+  public ResponseEntity<?> createCheckoutSession(@RequestBody CreateCheckoutSession req){
+    try{
+      String secret = Optional.ofNullable(System.getenv("STRIPE_SECRET")).orElse("");
+      if (secret.isBlank()) return ResponseEntity.status(500).body(Map.of("error","Stripe secret not configured"));
+      int amountCents = (int) Math.max(0, Math.round(Optional.ofNullable(req.amount()).orElse(0.0) * 100));
+      String currency = Optional.ofNullable(req.currency()).orElse("usd");
+      String successUrl = Optional.ofNullable(req.successUrl()).orElse("");
+      String cancelUrl = Optional.ofNullable(req.cancelUrl()).orElse("");
+
+      java.net.URL url = new java.net.URL("https://api.stripe.com/v1/checkout/sessions");
+      java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
+      conn.setRequestMethod("POST");
+      conn.setDoOutput(true);
+      conn.setRequestProperty("Authorization", "Bearer " + secret);
+      conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+
+      String enc = java.nio.charset.StandardCharsets.UTF_8.name();
+      StringBuilder body = new StringBuilder();
+      body.append("mode=payment");
+      body.append("&success_url=").append(java.net.URLEncoder.encode(successUrl, java.nio.charset.StandardCharsets.UTF_8));
+      body.append("&cancel_url=").append(java.net.URLEncoder.encode(cancelUrl, java.nio.charset.StandardCharsets.UTF_8));
+      body.append("&line_items[0][price_data][currency]=").append(java.net.URLEncoder.encode(currency, java.nio.charset.StandardCharsets.UTF_8));
+      body.append("&line_items[0][price_data][unit_amount]=").append(amountCents);
+      body.append("&line_items[0][price_data][product_data][name]=").append(java.net.URLEncoder.encode("Service purchase", java.nio.charset.StandardCharsets.UTF_8));
+      body.append("&line_items[0][quantity]=1");
+      Map<String,String> meta = Optional.ofNullable(req.metadata()).orElseGet(HashMap::new);
+      for (Map.Entry<String,String> entry : meta.entrySet()){
+        if (entry.getKey()==null || entry.getKey().isBlank()) continue;
+        String val = Optional.ofNullable(entry.getValue()).orElse("");
+        body.append("&metadata[").append(java.net.URLEncoder.encode(entry.getKey(), java.nio.charset.StandardCharsets.UTF_8)).append("]=")
+          .append(java.net.URLEncoder.encode(val, java.nio.charset.StandardCharsets.UTF_8));
+      }
+      try (java.io.OutputStream os = conn.getOutputStream()){
+        os.write(body.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+      }
+      int code = conn.getResponseCode();
+      java.io.InputStream is = (code >= 200 && code < 300) ? conn.getInputStream() : conn.getErrorStream();
+      String json = new String(is.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+      if (code < 200 || code >= 300){
+        return ResponseEntity.status(500).body(Map.of("error","Stripe error", "details", json));
+      }
+      String urlStr = extractJson(json, "url");
+      String id = extractJson(json, "id");
+      return ResponseEntity.ok(Map.of("url", urlStr, "id", id));
+    }catch(Exception e){
+      return ResponseEntity.status(500).body(Map.of("error","Failed to create checkout session"));
+    }
+  }
+
+  private String extractJson(String json, String key){
+    try{
+      String pat = "\"" + key + "\"\s*:\s*\"";
+      java.util.regex.Matcher m = java.util.regex.Pattern.compile(pat).matcher(json);
+      if (m.find()){
+        int start = m.end();
+        int end = json.indexOf('"', start);
+        if (end > start) return json.substring(start, end);
+      }
+    }catch(Exception ignore){}
+    return "";
   }
 }

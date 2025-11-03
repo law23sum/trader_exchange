@@ -33,9 +33,32 @@ public class DataSeeder {
 
   @PostConstruct
   public void seedDemoData(){
+    cleanLegacyMessaging();
     ensurePlayers();
     ensureListings();
     ensureUsers();
+  }
+
+  private void cleanLegacyMessaging(){
+    try { jdbc.update("DELETE FROM messages WHERE role = 'assistant'"); } catch (Exception ignored) {}
+    try { jdbc.update("DELETE FROM conversations WHERE kind = 'AI' OR title = 'AI Chat'"); } catch (Exception ignored) {}
+    try {
+      jdbc.update("DELETE FROM messages WHERE role = 'system' AND conversationId NOT IN (SELECT conversationId FROM messages WHERE role <> 'system')");
+    } catch (Exception ignored) {}
+    try {
+      jdbc.update("DELETE FROM conversations WHERE id NOT IN (SELECT DISTINCT conversationId FROM messages)");
+    } catch (Exception ignored) {}
+    try {
+      jdbc.update("""
+        UPDATE conversations
+        SET lastMessage = COALESCE((
+          SELECT content FROM messages
+          WHERE conversationId = conversations.id AND role <> 'system'
+          ORDER BY createdAt DESC
+          LIMIT 1
+        ), '')
+      """);
+    } catch (Exception ignored) {}
   }
 
   private void ensurePlayers(){
@@ -119,8 +142,9 @@ public class DataSeeder {
 
   private void ensureUsers(){
     try {
-      Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM users WHERE email IN (?,?,?)", Integer.class, "user@example.com", "trader@example.com", "admin@example.com");
-      if (count != null && count == 3) return;
+      Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM users WHERE email IN (?,?,?,?)", Integer.class,
+        "user@example.com", "trader@example.com", "milo@tradeexchange.com", "admin@example.com");
+      if (count != null && count == 4) return;
     } catch (Exception ignored) {}
     insertUsers();
   }
@@ -129,12 +153,16 @@ public class DataSeeder {
     String now = Instant.now().toString();
     String userHash = passwords.hashPassword("password");
     String traderHash = passwords.hashPassword("password");
+    String miloHash = passwords.hashPassword("password");
     String adminHash = passwords.hashPassword("password");
     jdbc.update("INSERT OR IGNORE INTO users (id,name,email,password,role,createdAt,providerPlayerId) VALUES (?,?,?,?,?,?,?)",
       "u_demo","Demo User","user@example.com",userHash,"USER",now,null
     );
     jdbc.update("INSERT OR IGNORE INTO users (id,name,email,password,role,createdAt,providerPlayerId) VALUES (?,?,?,?,?,?,?)",
       "u_morgan","Morgan Harper","trader@example.com",traderHash,"TRADER",now,"p_morgan"
+    );
+    jdbc.update("INSERT OR IGNORE INTO users (id,name,email,password,role,createdAt,providerPlayerId) VALUES (?,?,?,?,?,?,?)",
+      "u_milo","Milo Provider","milo@tradeexchange.com",miloHash,"TRADER",now,"p_milo"
     );
     jdbc.update("INSERT OR IGNORE INTO users (id,name,email,password,role,createdAt,providerPlayerId) VALUES (?,?,?,?,?,?,?)",
       "u_admin","Admin","admin@example.com",adminHash,"ADMIN",now,null
