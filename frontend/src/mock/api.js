@@ -52,10 +52,53 @@ export async function mockFetch(path, opts={}){
   const now = new Date().toISOString();
   const body = (() => { try{ return opts.body ? JSON.parse(opts.body) : {} }catch{ return {} } })();
   const token = (opts.headers?.Authorization || '').startsWith('Bearer ') ? opts.headers.Authorization.slice(7) : getToken();
-  const getConvs = () => { try{ return JSON.parse(localStorage.getItem('tx_convs')||'[]') }catch{ return [] } }
+  const getConvs = () => {
+    try{
+      const raw = JSON.parse(localStorage.getItem('tx_convs')||'[]')
+      if (!Array.isArray(raw)) return []
+      let mutated = false
+      const cleaned = raw
+        .filter(item => {
+          const keep = item && typeof item === 'object'
+          if (!keep) mutated = true
+          return keep
+        })
+        .map(item => {
+          const next = { ...item }
+          if (!next.kind || next.kind === 'AI'){ next.kind = 'DIRECT'; mutated = true }
+          if (!next.title || (item.kind === 'AI' && item.title === 'AI Chat')){ next.title = 'Conversation'; mutated = true }
+          return next
+        })
+      cleaned.forEach(conv => {
+        const msgs = getMsgs(conv.id).filter(m => m.role !== 'system' && String(m.content||'').trim() !== '')
+        const last = msgs.length > 0 ? msgs[msgs.length - 1].content : ''
+        if ((conv.lastMessage || '') !== last){ conv.lastMessage = last; mutated = true }
+      })
+      if (mutated){
+        localStorage.setItem('tx_convs', JSON.stringify(cleaned))
+      }
+      return cleaned
+    }catch{
+      return []
+    }
+  }
   const setConvs = (v) => localStorage.setItem('tx_convs', JSON.stringify(v))
-  const getMsgs = (cid) => { try{ return JSON.parse(localStorage.getItem(`tx_msgs_${cid}`)||'[]') }catch{ return [] } }
+  const getMsgs = (cid) => {
+    try{
+      const raw = JSON.parse(localStorage.getItem(`tx_msgs_${cid}`)||'[]')
+      if (!Array.isArray(raw)) return []
+      const cleaned = raw.filter(item => item && typeof item === 'object' && item.role !== 'assistant')
+      if (cleaned.length !== raw.length){
+        localStorage.setItem(`tx_msgs_${cid}`, JSON.stringify(cleaned))
+      }
+      return cleaned
+    }catch{
+      return []
+    }
+  }
   const setMsgs = (cid, v) => localStorage.setItem(`tx_msgs_${cid}`, JSON.stringify(v))
+  const getOrders = () => { try{ return JSON.parse(localStorage.getItem('tx_orders')||'[]') }catch{ return [] } }
+  const setOrders = (v) => localStorage.setItem('tx_orders', JSON.stringify(v))
 
   // Auth endpoints
   if (path === '/api/signin' && method === 'POST'){
@@ -122,7 +165,7 @@ export async function mockFetch(path, opts={}){
   }
   if (path === '/api/conversations' && method === 'POST'){
     if (!token) return res(401, { error:'No token' });
-    const conv = { id: uid(), kind: (body.kind||'AI'), title: body.title||'AI Chat', createdAt: now, lastMessage:'' }
+    const conv = { id: uid(), kind: (body.kind||'DIRECT'), title: body.title||'Conversation', createdAt: now, lastMessage:'' }
     const all = getConvs(); all.unshift(conv); setConvs(all)
     setMsgs(conv.id, [])
     return res(200, conv)
@@ -140,11 +183,13 @@ export async function mockFetch(path, opts={}){
     const msgs = getMsgs(cid)
     const m = { id: uid(), conversationId: cid, userId: user?.id||null, role:'user', content: String(body.content||''), createdAt: now }
     msgs.push(m)
-    const a = { id: uid(), conversationId: cid, userId: null, role:'assistant', content: `You said: ${m.content}`, createdAt: now }
-    msgs.push(a)
     setMsgs(cid, msgs)
-    const all = getConvs(); const idx = all.findIndex(c=>c.id===cid); if (idx>=0){ all[idx].lastMessage = a.content; setConvs(all) }
-    return res(200, { ok:true, message:m, assistant:a })
+    const all = getConvs(); const idx = all.findIndex(c=>c.id===cid);
+    if (idx>=0){
+      all[idx].lastMessage = m.content;
+      setConvs(all)
+    }
+    return res(200, { ok:true, message:m })
   }
 
   // Public data
@@ -188,6 +233,59 @@ export async function mockFetch(path, opts={}){
     if (!token) return res(401, { error:'No token' });
     return res(200, []);
   }
+  if (path === '/api/trader/orders' && method === 'GET'){
+    if (!token) return res(401, { error:'No token' });
+    return res(200, getOrders());
+  }
+  const traderActionMatch = path.match(/^\/api\/trader\/orders\/(.+)\/action$/)
+  if (traderActionMatch && method === 'POST'){
+    if (!token) return res(401, { error:'No token' });
+    const orderId = traderActionMatch[1];
+    const orders = getOrders();
+    const idx = orders.findIndex(o => o.id === orderId);
+    if (idx >= 0){
+      const action = (body.action || '').toLowerCase();
+      if (action === 'approve') orders[idx].status = 'approved';
+      if (action === 'complete') orders[idx].status = 'complete';
+      if (action === 'discuss') orders[idx].status = 'discuss';
+      if (action === 'approve') orders[idx].request = { ...(orders[idx].request||{}), ack:true };
+      setOrders(orders);
+    }
+    return res(200, { ok:true });
+  }
+  const traderCompleteMatch = path.match(/^\/api\/trader\/orders\/(.+)\/complete-with-details$/)
+  if (traderCompleteMatch && method === 'POST'){
+    if (!token) return res(401, { error:'No token' });
+    const orderId = traderCompleteMatch[1];
+    const orders = getOrders();
+    const idx = orders.findIndex(o => o.id === orderId);
+    if (idx >= 0){
+      orders[idx].status = 'complete';
+      const existing = orders[idx].request?.details || '';
+      const appendix = [existing, body.notes && `Completion notes: ${body.notes}`, body.photoUrl && `Photo: ${body.photoUrl}`].filter(Boolean).join('\n');
+      orders[idx].request = { ...(orders[idx].request || {}), details: appendix, ack:true };
+      setOrders(orders);
+    }
+    return res(200, { ok:true });
+  }
+  if (path === '/api/orders/mine' && method === 'GET'){
+    if (!token) return res(401, { error:'No token' });
+    const user = getUser();
+    const nameKey = (user?.name || '').toLowerCase();
+    const emailKey = (user?.email || '').toLowerCase();
+    const orders = getOrders().filter(o => {
+      const uname = (o.userName || '').toLowerCase();
+      const uemail = (o.userEmail || '').toLowerCase();
+      return (!!nameKey && uname === nameKey) || (!!emailKey && (uemail === emailKey || uname === emailKey));
+    });
+    return res(200, orders);
+  }
+  const reviewMatch = path.match(/^\/api\/orders\/(.+)\/review$/)
+  if (reviewMatch && method === 'POST'){
+    if (!token) return res(401, { error:'No token' });
+    const rating = Math.max(1, Math.min(5, Number(body.rating)||5));
+    return res(200, { ok:true, reviewId: uid(), rating });
+  }
   if (path === '/api/trader/profile' && method === 'GET'){
     if (!token) return res(401, { error:'No token' });
     const u = getUser();
@@ -205,9 +303,82 @@ export async function mockFetch(path, opts={}){
     try{ localStorage.setItem('tx_provider_profile', opts.body || '{}') }catch{}
     return res(200, { ok:true });
   }
+  if (path === '/api/orders/request' && method === 'POST'){
+    if (!token) return res(401, { error:'No token' });
+    const orders = getOrders();
+    const id = uid();
+    orders.unshift({
+      id,
+      userName: getUser()?.name || 'Customer',
+      userEmail: getUser()?.email || '',
+      service: body.title || 'Consultation request',
+      status: 'discuss',
+      amount: 0,
+      createdAt: now,
+      providerId: body.providerId || 'mock-provider',
+      listingId: body.listingId || 'mock-listing',
+      providerName: body.providerId || 'Mock Provider',
+      request: {
+        details: body.details || '',
+        date: body.date || '',
+        time: body.time || '',
+        ack: false
+      }
+    });
+    setOrders(orders);
+    return res(200, { ok:true, orderId: id });
+  }
   if (path === '/api/checkout' && method === 'POST'){
     if (!token) return res(401, { error:'No token' });
-    return res(200, { ok:true, txId: uid() });
+    const orders = getOrders();
+    const id = uid();
+    orders.unshift({
+      id,
+      userName: body.name || body.email || 'Customer',
+      userEmail: body.email || '',
+      service: 'Service purchase',
+      status: 'approved',
+      amount: body.amount || 0,
+      createdAt: now,
+      providerId: body.providerId || 'mock-provider',
+      listingId: body.listingId || 'mock-listing',
+      providerName: body.providerId || 'Mock Provider',
+      request: {
+        details: [body.note, body.tasks && `Tasks: ${body.tasks}`, body.address && `Address: ${body.address}`, body.phone && `Phone: ${body.phone}`].filter(Boolean).join('\n'),
+        date: body.date || '',
+        time: body.time || '',
+        ack: true
+      }
+    });
+    setOrders(orders);
+    return res(200, { ok:true, txId: uid(), orderId: id });
+  }
+  if (path === '/api/stripe/create-checkout-session' && method === 'POST'){
+    if (!token) return res(401, { error:'No token' });
+    const meta = body.metadata || {}
+    const orders = getOrders();
+    const id = uid();
+    orders.unshift({
+      id,
+      userName: meta.name || getUser()?.name || 'Customer',
+      userEmail: meta.email || getUser()?.email || '',
+      service: 'Service purchase',
+      status: 'approved',
+      amount: body.amount || 0,
+      createdAt: now,
+      providerId: meta.providerId || 'mock-provider',
+      listingId: meta.listingId || 'mock-listing',
+      providerName: meta.providerId || 'Mock Provider',
+      request: {
+        details: [meta.address && `Address: ${meta.address}`, meta.phone && `Phone: ${meta.phone}`].filter(Boolean).join('\n'),
+        date: meta.date || '',
+        time: meta.time || '',
+        ack: true
+      }
+    });
+    setOrders(orders);
+    const redirectUrl = body.successUrl || `${window.location.origin}/payment/success?mock=1`
+    return res(200, { url: redirectUrl, id, checkoutId: id });
   }
 
   return res(404, { error: 'Not found in mock', path, method });

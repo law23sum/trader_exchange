@@ -1,110 +1,290 @@
-import React, { useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { fetchAuthed } from '../hooks/useAuth.js'
-import { Section, Button, Input } from '../components/ui.js'
-import { currency } from '../components/ui.js'
+import { Section, Button, Badge, currency } from '../components/ui.js'
+import { JourneyStepper } from '../components/JourneyStepper.jsx'
+
+const STATUS_ORDER = ['approved', 'in_progress', 'discuss', 'pending', 'complete', 'cancelled']
+
+function normalizeDate(value){
+  if (!value) return null
+  const timestamp = Date.parse(value)
+  return Number.isNaN(timestamp) ? null : new Date(timestamp)
+}
+
+function formatStatus(status){
+  const value = String(status || 'pending').replace(/_/g, ' ')
+  return value.charAt(0).toUpperCase() + value.slice(1)
+}
+
+function orderSortKey(order){
+  const scheduled = order?.request?.date ? [order.request.date, order.request.time].filter(Boolean).join(' ') : null
+  const parsed = scheduled ? normalizeDate(scheduled) : normalizeDate(order?.createdAt)
+  return parsed ? parsed.getTime() : Number.MAX_SAFE_INTEGER
+}
 
 export default function TraderDashboard(){
+  const navigate = useNavigate()
   const [me, setMe] = useState(null)
   const [summary, setSummary] = useState({ earnings:0, orders:0 })
   const [history, setHistory] = useState([])
-  const [bio, setBio] = useState('')
-  const [location, setLocation] = useState('')
-  const [website, setWebsite] = useState('')
-  const [phone, setPhone] = useState('')
-  const [specialties, setSpecialties] = useState('')
-  const [hourlyRate, setHourlyRate] = useState('')
-  const [availability, setAvailability] = useState('')
-  const [experienceYears, setExperienceYears] = useState('')
-  const [languages, setLanguages] = useState('')
-  const [certifications, setCertifications] = useState('')
-  const [socialTwitter, setSocialTwitter] = useState('')
-  const [socialInstagram, setSocialInstagram] = useState('')
-  const [portfolio, setPortfolio] = useState('')
-  // Portrait Session specifics
-  const [sessionLength, setSessionLength] = useState('60 min')
-  const [editedPhotos, setEditedPhotos] = useState('10')
-  const [delivery, setDelivery] = useState('Online gallery')
-  const [turnaround, setTurnaround] = useState('3–5 days')
-  const [onLocation, setOnLocation] = useState(true)
-  const [studioAvailable, setStudioAvailable] = useState(false)
-  const [travelRadius, setTravelRadius] = useState('15 miles')
-  const [stylesDetail, setStylesDetail] = useState('natural light, candid, editorial')
-  const [equipment, setEquipment] = useState('Full-frame body, 50mm, 85mm, reflector')
+  const [orders, setOrders] = useState([])
+  const [loadingSummary, setLoadingSummary] = useState(false)
+  const [loadingOrders, setLoadingOrders] = useState(false)
+  const [loadingHistory, setLoadingHistory] = useState(false)
+  const [messagingOrderId, setMessagingOrderId] = useState(null)
+
+  const refreshSummary = useCallback(async () => {
+    setLoadingSummary(true)
+    try{
+      const res = await fetchAuthed('/api/trader/summary')
+      if (res.ok) setSummary(await res.json())
+      else setSummary(prev => ({ ...prev }))
+    }catch{}
+    finally { setLoadingSummary(false) }
+  }, [])
+
+  const refreshHistory = useCallback(async () => {
+    setLoadingHistory(true)
+    try{
+      const res = await fetchAuthed('/api/trader/history')
+      if (res.ok) setHistory(await res.json())
+      else setHistory([])
+    }catch{
+      setHistory([])
+    }
+    finally { setLoadingHistory(false) }
+  }, [])
+
+  const refreshOrders = useCallback(async () => {
+    setLoadingOrders(true)
+    try{
+      const res = await fetchAuthed('/api/trader/orders')
+      if (res.ok) setOrders(await res.json())
+      else setOrders([])
+    }catch{
+      setOrders([])
+    }
+    finally { setLoadingOrders(false) }
+  }, [])
 
   useEffect(() => {
     (async () => {
       try{
-        const m = await fetchAuthed('/api/me'); if (m.ok){ const u = await m.json(); setMe(u) }
-        const s = await fetchAuthed('/api/trader/summary'); if (s.ok) setSummary(await s.json())
-        const h = await fetchAuthed('/api/trader/history'); if (h.ok) setHistory(await h.json())
-        const pr = await fetchAuthed('/api/trader/profile'); if (pr.ok){ const p = await pr.json(); setBio(p.bio||''); setLocation(p.location||''); setWebsite(p.website||''); setPhone(p.phone||''); setSpecialties(p.specialties||''); setHourlyRate(p.hourlyRate||''); setAvailability(p.availability||''); setExperienceYears(p.experienceYears||''); setLanguages(p.languages||''); setCertifications(p.certifications||''); setSocialTwitter(p.socialTwitter||''); setSocialInstagram(p.socialInstagram||''); setPortfolio(p.portfolio||''); setSessionLength(p.sessionLength||'60 min'); setEditedPhotos(String(p.editedPhotos||'10')); setDelivery(p.delivery||'Online gallery'); setTurnaround(p.turnaround||'3–5 days'); setOnLocation(Boolean(p.onLocation ?? true)); setStudioAvailable(Boolean(p.studioAvailable ?? false)); setTravelRadius(p.travelRadius||'15 miles'); setStylesDetail(p.styles||'natural light, candid, editorial'); setEquipment(p.equipment||'Full-frame body, 50mm, 85mm, reflector') }
+        const meRes = await fetchAuthed('/api/me')
+        if (meRes.ok) setMe(await meRes.json())
       }catch{}
+      await Promise.all([refreshSummary(), refreshOrders(), refreshHistory()])
     })()
-  }, [])
+  }, [refreshSummary, refreshOrders, refreshHistory])
 
-  const saveProfile = async () => {
+  const openOrders = useMemo(() => orders.filter(order => String(order.status || '').toLowerCase() !== 'complete'), [orders])
+  const completedOrders = useMemo(() => orders.filter(order => String(order.status || '').toLowerCase() === 'complete').length, [orders])
+
+  const pipeline = useMemo(() => {
+    const counts = new Map()
+    for (const order of orders){
+      const status = String(order.status || 'pending').toLowerCase()
+      counts.set(status, (counts.get(status) || 0) + 1)
+    }
+    const known = STATUS_ORDER.filter(status => counts.has(status))
+    const extras = Array.from(counts.keys()).filter(status => !STATUS_ORDER.includes(status)).sort()
+    return [...known, ...extras].map(status => ({ status, count: counts.get(status) }))
+  }, [orders])
+
+  const nextCommitment = useMemo(() => {
+    if (openOrders.length === 0) return null
+    return openOrders.slice().sort((a, b) => orderSortKey(a) - orderSortKey(b))[0]
+  }, [openOrders])
+
+  const handleMessageCustomer = useCallback((order) => {
+    if (!order) return
+    setMessagingOrderId(order.id)
     try{
-      const r = await fetchAuthed('/api/trader/profile', { method:'POST', body: JSON.stringify({ bio, location, website, phone, specialties, hourlyRate: Number(hourlyRate||0), availability, experienceYears: Number(experienceYears||0), languages, certifications, socialTwitter, socialInstagram, portfolio, sessionLength, editedPhotos: Number(editedPhotos||0), delivery, turnaround, onLocation, studioAvailable, travelRadius, styles: stylesDetail, equipment }) })
-      if (r.ok) alert('Profile saved'); else alert('Failed to save')
-    }catch{}
-  }
+      if (order.conversationId){
+        navigate(`/messages/${order.conversationId}`)
+      } else {
+        navigate('/messages')
+      }
+    } finally {
+      setMessagingOrderId(null)
+    }
+  }, [navigate])
+
+  const acknowledgementRate = useMemo(() => {
+    if (orders.length === 0) return 0
+    const acknowledged = orders.filter(order => order?.request?.ack).length
+    return Math.round((acknowledged / orders.length) * 100)
+  }, [orders])
+
+  const topCustomers = useMemo(() => {
+    const counts = new Map()
+    for (const order of orders){
+      const key = order?.userName || 'Customer'
+      counts.set(key, (counts.get(key) || 0) + 1)
+    }
+    return Array.from(counts.entries()).map(([name, total]) => ({ name, total }))
+      .sort((a, b) => b.total - a.total)
+      .slice(0, 5)
+  }, [orders])
+
+  const recentInteractions = useMemo(() => {
+    return history
+      .map(item => ({ ...item, atDate: normalizeDate(item?.at) || new Date(0) }))
+      .sort((a, b) => b.atDate.getTime() - a.atDate.getTime())
+      .slice(0, 5)
+  }, [history])
+
+  const revenuePerOrder = useMemo(() => {
+    const totalOrders = orders.length || summary.orders
+    if (!totalOrders) return 0
+    return (summary.earnings || 0) / totalOrders
+  }, [orders.length, summary.earnings, summary.orders])
 
   return (
-    <main className="max-w-6xl mx-auto px-4 py-6">
-      <h1 className="text-2xl font-semibold mb-4">Trader dashboard{me ? ` — ${me.name}` : ''}</h1>
+    <main className="tx-container space-y-8 py-10">
+      <JourneyStepper stage="service" />
 
-      <Section title="Earnings">
-        <div className="grid sm:grid-cols-2 gap-3">
-          <div className="border rounded-2xl p-4"><div className="text-sm text-gray-500">Total earnings</div><div className="text-2xl font-semibold">{currency(summary.earnings || 0)}</div></div>
-          <div className="border rounded-2xl p-4"><div className="text-sm text-gray-500">Total orders</div><div className="text-2xl font-semibold">{summary.orders || 0}</div></div>
-        </div>
-      </Section>
-
-      <Section title="Your profile">
-        <div className="space-y-2">
-          <div><label className="text-xs text-gray-500">Bio</label><textarea rows={4} className="w-full px-3 py-2 rounded-xl border border-gray-300" value={bio} onChange={e=>setBio(e.target.value)} /></div>
-          <div className="grid sm:grid-cols-2 gap-3">
-            <div><label className="text-xs text-gray-500">Location</label><Input value={location} onChange={setLocation} placeholder="City, Country" /></div>
-            <div><label className="text-xs text-gray-500">Website</label><Input value={website} onChange={setWebsite} placeholder="https://example.com" /></div>
-            <div><label className="text-xs text-gray-500">Phone</label><Input value={phone} onChange={setPhone} placeholder="+1 555-123-4567" /></div>
-            <div><label className="text-xs text-gray-500">Specialties (comma separated)</label><Input value={specialties} onChange={setSpecialties} placeholder="portrait, weddings, events" /></div>
-            <div><label className="text-xs text-gray-500">Hourly rate (USD)</label><Input value={hourlyRate} onChange={setHourlyRate} placeholder="75" /></div>
-            <div><label className="text-xs text-gray-500">Availability</label><Input value={availability} onChange={setAvailability} placeholder="Weekdays 9–5" /></div>
-            <div><label className="text-xs text-gray-500">Years of experience</label><Input value={experienceYears} onChange={setExperienceYears} placeholder="5" /></div>
-            <div><label className="text-xs text-gray-500">Languages</label><Input value={languages} onChange={setLanguages} placeholder="English, Spanish" /></div>
-            <div className="sm:col-span-2"><label className="text-xs text-gray-500">Certifications</label><Input value={certifications} onChange={setCertifications} placeholder="Certified Pro, Safety Cert" /></div>
-            <div><label className="text-xs text-gray-500">Twitter</label><Input value={socialTwitter} onChange={setSocialTwitter} placeholder="https://twitter.com/handle" /></div>
-            <div><label className="text-xs text-gray-500">Instagram</label><Input value={socialInstagram} onChange={setSocialInstagram} placeholder="https://instagram.com/handle" /></div>
-            <div className="sm:col-span-2"><label className="text-xs text-gray-500">Portfolio</label><Input value={portfolio} onChange={setPortfolio} placeholder="https://portfolio.example.com" /></div>
+      <section className="space-y-4">
+        <div className="tx-card flex flex-col gap-4 p-6 lg:flex-row lg:items-center lg:justify-between">
+          <div className="space-y-1">
+            <h1 className="text-3xl font-semibold text-gray-900">{me ? `${me.name}'s status board` : 'Trader status board'}</h1>
+            <p className="text-sm text-gray-600">Gauge your workload, revenue, and customer engagement at a glance.</p>
           </div>
-          <Button onClick={saveProfile}>Save</Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="primary" onClick={refreshOrders} disabled={loadingOrders}>{loadingOrders ? 'Refreshing orders…' : 'Refresh orders'}</Button>
+            <Button variant="ghost" onClick={refreshSummary} disabled={loadingSummary}>{loadingSummary ? 'Refreshing metrics…' : 'Refresh metrics'}</Button>
+            <Button variant="ghost" onClick={() => navigate('/')}>Go to home</Button>
+          </div>
         </div>
-      </Section>
-
-      <Section title="Portrait session details">
-        <div className="grid sm:grid-cols-2 gap-3">
-          <div><label className="text-xs text-gray-500">Session length</label><Input value={sessionLength} onChange={setSessionLength} placeholder="60 min" /></div>
-          <div><label className="text-xs text-gray-500">Edited photos included</label><Input value={editedPhotos} onChange={setEditedPhotos} placeholder="10" /></div>
-          <div><label className="text-xs text-gray-500">Delivery method</label><Input value={delivery} onChange={setDelivery} placeholder="Online gallery" /></div>
-          <div><label className="text-xs text-gray-500">Turnaround time</label><Input value={turnaround} onChange={setTurnaround} placeholder="3–5 days" /></div>
-          <div><label className="text-xs text-gray-500">Travel radius</label><Input value={travelRadius} onChange={setTravelRadius} placeholder="15 miles" /></div>
-          <div><label className="text-xs text-gray-500">Styles (comma separated)</label><Input value={stylesDetail} onChange={setStylesDetail} placeholder="natural light, candid, editorial" /></div>
-          <div className="sm:col-span-2"><label className="text-xs text-gray-500">Equipment</label><Input value={equipment} onChange={setEquipment} placeholder="Full-frame body, 50mm, 85mm, reflector" /></div>
-          <label className="flex items-center gap-2 text-sm text-gray-700"><input type="checkbox" checked={onLocation} onChange={e=>setOnLocation(e.target.checked)} /> On location</label>
-          <label className="flex items-center gap-2 text-sm text-gray-700"><input type="checkbox" checked={studioAvailable} onChange={e=>setStudioAvailable(e.target.checked)} /> Studio available</label>
+        <div className="grid gap-3 sm:grid-cols-3">
+          <div className="tx-card p-5 text-sm text-gray-600">
+            <div className="text-xs font-semibold uppercase tracking-wide text-gray-400">Total earnings</div>
+            <div className="mt-1 text-2xl font-semibold text-gray-900">{currency(summary.earnings || 0)}</div>
+            <p className="mt-2 text-xs">Revenue captured through completed bookings and checkout sessions.</p>
+          </div>
+          <div className="tx-card p-5 text-sm text-gray-600">
+            <div className="text-xs font-semibold uppercase tracking-wide text-gray-400">Open orders</div>
+            <div className="mt-1 text-2xl font-semibold text-gray-900">{openOrders.length}</div>
+            <p className="mt-2 text-xs">Work in flight—prioritize high value customers or upcoming dates.</p>
+          </div>
+          <div className="tx-card p-5 text-sm text-gray-600">
+            <div className="text-xs font-semibold uppercase tracking-wide text-gray-400">Interactions logged</div>
+            <div className="mt-1 text-2xl font-semibold text-gray-900">{history.length}</div>
+            <p className="mt-2 text-xs">Track conversations, handoffs, and completion notes.</p>
+          </div>
         </div>
-        <div className="mt-3"><Button onClick={saveProfile}>Save</Button></div>
-      </Section>
+      </section>
 
-      <Section title="Recent interactions">
-        <div className="space-y-2">
-          {history.map(h => (
-            <div key={h.id} className="border rounded-2xl p-3 flex items-center justify-between">
-              <div className="text-sm"><span className="font-medium">{h.userName}</span> — {h.note}</div>
-              <div className="text-xs text-gray-500">{new Date(h.at).toLocaleString()} · {currency(h.amount||0)}</div>
+      <Section
+        title="Service pipeline"
+        right={<span className="text-xs text-gray-500">{orders.length} total orders</span>}
+      >
+        <div className="grid gap-3 lg:grid-cols-2">
+          {pipeline.length === 0 && <div className="text-sm text-gray-500">No orders in the system yet—bookings from the home queue will populate this view.</div>}
+          {pipeline.map(entry => (
+            <div key={entry.status} className="rounded-2xl border border-gray-200 bg-white p-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-sm font-semibold text-gray-900">{formatStatus(entry.status)}</div>
+                  <p className="text-xs text-gray-500">Orders currently tagged as {formatStatus(entry.status).toLowerCase()}.</p>
+                </div>
+                <Badge className="border-gray-200 text-gray-700">{entry.count}</Badge>
+              </div>
+              <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-gray-100">
+                <div className="h-full bg-gray-900" style={{ width: `${orders.length ? Math.max(8, (entry.count / orders.length) * 100) : 0}%` }} />
+              </div>
             </div>
           ))}
-          {history.length === 0 && <div className="text-sm text-gray-500">No interactions yet.</div>}
+        </div>
+      </Section>
+
+      <Section
+        title="Next commitments"
+        right={nextCommitment ? <span className="text-xs text-gray-500">Order #{nextCommitment.id}</span> : null}
+      >
+        {nextCommitment ? (
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="space-y-1">
+                <div className="text-sm font-semibold text-gray-900">{nextCommitment.userName || 'Customer'}</div>
+                <div className="text-xs text-gray-500">{nextCommitment.userEmail || 'No email on file'}</div>
+                <div className="text-xs text-gray-500">Service: {nextCommitment.service || 'Service request'}</div>
+                {nextCommitment.request?.date && (
+                  <div className="text-xs text-gray-500">Scheduled: {[nextCommitment.request.date, nextCommitment.request.time].filter(Boolean).join(' · ')}</div>
+                )}
+              </div>
+              <Badge className="border-gray-200 text-gray-600">{formatStatus(nextCommitment.status)}</Badge>
+            </div>
+            {nextCommitment.request?.details && (
+              <pre className="whitespace-pre-wrap rounded-2xl bg-gray-50 px-4 py-3 text-sm text-gray-700">{nextCommitment.request.details}</pre>
+            )}
+            <div className="flex flex-wrap gap-2 text-xs text-gray-500">
+              <button
+                type="button"
+                onClick={() => handleMessageCustomer(nextCommitment)}
+                disabled={messagingOrderId === nextCommitment.id}
+                className="rounded-full border border-gray-200 px-3 py-1 font-medium text-gray-600 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {messagingOrderId === nextCommitment.id ? 'Opening chat…' : 'Message customer'}
+              </button>
+              <button
+                type="button"
+                onClick={() => navigate('/')}
+                className="rounded-full border border-gray-200 px-3 py-1 font-medium text-gray-600 transition hover:bg-gray-100"
+              >
+                View in home queue
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="text-sm text-gray-500">No upcoming commitments detected. Stay tuned to the home page queue for new arrivals.</div>
+        )}
+      </Section>
+
+      <Section
+        title="Customer insights"
+        right={<span className="text-xs text-gray-500">Ack rate {acknowledgementRate}%</span>}
+      >
+        <div className="grid gap-3 md:grid-cols-2">
+          <div className="rounded-2xl border border-gray-200 bg-white p-4">
+            <div className="text-sm font-semibold text-gray-900">Top customers by requests</div>
+            <div className="mt-2 space-y-2">
+              {topCustomers.map(item => (
+                <div key={item.name} className="flex items-center justify-between text-xs text-gray-500">
+                  <span>{item.name}</span>
+                  <span>{item.total}</span>
+                </div>
+              ))}
+              {topCustomers.length === 0 && <div className="text-xs text-gray-500">No customer activity yet.</div>}
+            </div>
+          </div>
+          <div className="rounded-2xl border border-gray-200 bg-white p-4">
+            <div className="text-sm font-semibold text-gray-900">Average revenue per order</div>
+            <p className="mt-2 text-2xl font-semibold text-gray-900">{currency(revenuePerOrder || 0)}</p>
+            <p className="text-xs text-gray-500">Calculated from total earnings divided by orders logged.</p>
+            <div className="mt-3 rounded-xl bg-gray-50 p-3 text-xs text-gray-500">
+              Completed orders recorded: {completedOrders}. Increase completion volume to raise average revenue.</div>
+          </div>
+        </div>
+      </Section>
+
+      <Section
+        title="Recent interactions"
+        right={<span className="text-xs text-gray-500">{loadingHistory ? 'Loading…' : `${history.length} logged`}</span>}
+      >
+        <div className="space-y-2">
+          {loadingHistory && <div className="text-sm text-gray-500">Fetching interaction history…</div>}
+          {!loadingHistory && recentInteractions.length === 0 && <div className="text-sm text-gray-500">No interactions recorded yet.</div>}
+          {recentInteractions.map(item => (
+            <div key={item.id || `${item.userName}-${item.at}`} className="rounded-2xl border border-gray-200 bg-white p-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="text-sm font-semibold text-gray-900">{item.userName || 'Customer'}</div>
+                <div className="text-xs text-gray-500">{normalizeDate(item.at)?.toLocaleString() || '—'} · {currency(item.amount || 0)}</div>
+              </div>
+              <div className="mt-1 text-xs text-gray-500">{item.note || 'No note provided.'}</div>
+            </div>
+          ))}
         </div>
       </Section>
     </main>

@@ -27,15 +27,19 @@ export default function ConversationPage(){
 
   return (
     <main className="max-w-3xl mx-auto px-4 py-6">
-      <div ref={listRef} className="border rounded-2xl p-3 h-[60vh] overflow-y-auto bg-white">
-        {messages.map(m => (
+      <div className="mb-3 flex items-center gap-3">
+        <div className="size-8 rounded-full bg-gradient-to-tr from-gray-200 to-gray-50 border grid place-items-center text-xs font-semibold">💬</div>
+        <h1 className="text-lg font-semibold">Conversation</h1>
+      </div>
+      <div ref={listRef} className="border rounded-2xl p-3 h-[60vh] overflow-y-auto bg-white shadow-sm">
+        {messages.filter(m => m.role !== 'system' && String(m.content || '').trim() !== '').map(m => (
           <div key={m.id} className={`my-2 ${m.role==='user' ? 'text-right' : 'text-left'}`}>
-            <div className={`inline-block px-3 py-2 rounded-2xl border ${m.role==='user'?'bg-black text-white border-black':'bg-gray-50 text-gray-800 border-gray-200'}`}>
+            <div className={`inline-block px-3 py-2 rounded-2xl border shadow-sm ${m.role==='user'?'bg-black text-white border-black':'bg-gray-50 text-gray-800 border-gray-200'}`}>
               <pre className="whitespace-pre-wrap break-words text-sm">{m.content}</pre>
             </div>
           </div>
         ))}
-        {messages.length===0 && <div className="text-sm text-gray-500">Say hi to start the conversation.</div>}
+        {messages.filter(m => m.role !== 'system' && String(m.content || '').trim() !== '').length===0 && <div className="text-sm text-gray-500">Say hi to start the conversation.</div>}
       </div>
       <form onSubmit={send} className="mt-3 flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
         <Input value={text} onChange={setText} placeholder="Type a message..." onKeyDown={e=>{ if(e.key==='Enter'&&!e.shiftKey){ send(e) } }} />

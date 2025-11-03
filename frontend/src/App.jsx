@@ -10,6 +10,9 @@ import SignUp from './pages/SignUp.jsx'
 import UserDashboard from './pages/UserDashboard.jsx'
 import TraderDashboard from './pages/TraderDashboard.jsx'
 import AdminDashboard from './pages/AdminDashboard.jsx'
+import CustomerHome from './pages/CustomerHome.jsx'
+import TraderHome from './pages/TraderHome.jsx'
+import AdminHome from './pages/AdminHome.jsx'
 import About from './pages/About.jsx'
 
 // Robust trader detection to handle different backends
@@ -40,20 +43,10 @@ import MessagesList from './pages/MessagesList.jsx'
 import ConversationPage from './pages/ConversationPage.jsx'
 import AuthCallback from './pages/AuthCallback.jsx'
 import BecomeProvider from './pages/BecomeProvider.jsx'
+import CustomerDetails from './pages/CustomerDetails.jsx'
+import StripeSuccess from './pages/StripeSuccess.jsx'
 import { Input, Button } from './components/ui.js'
 import { fetchAuthed, setToken } from './hooks/useAuth.js'
-
-function DashboardRedirect({ me }){
-  // Fallback: try local cache if me not loaded yet
-  try {
-    const cached = JSON.parse(localStorage.getItem('tx_user')||'null')
-    if (!me && cached) me = cached
-  } catch {}
-  if (!me) return <div className="p-4 text-sm text-gray-600">Loading…</div>
-  if (isAdmin(me)) return <Navigate to="/admin" replace />
-  const goTrader = isTrader(me)
-  return <Navigate to={goTrader ? '/dashboard/trader' : '/dashboard/user'} replace />
-}
 
 function TraderOnly({ me, loading, children }){
   if (loading) return <div className="p-4 text-sm text-gray-600">Loading…</div>
@@ -72,6 +65,14 @@ function AdminOnly({ me, loading, children }){
   if (loading) return <div className="p-4 text-sm text-gray-600">Loading…</div>
   if (!me) return <Navigate to="/signin" replace />
   return isAdmin(me) ? children : <Navigate to={isTrader(me) ? '/dashboard/trader' : '/dashboard/user'} replace />
+}
+
+function HomeEntry({ me, loading, q, setQ, onSearch }){
+  if (loading) return <div className="p-6 text-sm text-gray-600">Loading your workspace…</div>
+  if (!me) return <HomeSearch onSearch={onSearch} q={q} setQ={setQ} />
+  if (isAdmin(me)) return <AdminHome me={me} />
+  if (isTrader(me)) return <TraderHome me={me} />
+  return <CustomerHome me={me} />
 }
 
 
@@ -104,50 +105,55 @@ export default function App(){
   // Render the shell immediately; auth loads in background.
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-gray-50 to-white text-gray-900">
-      <header className="sticky top-0 z-10 backdrop-blur bg-white/70 border-b">
-        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-3 cursor-pointer" onClick={() => navigate('/')}>
-            <div className="size-8 rounded-xl bg-black text-white grid place-items-center font-bold">TX</div>
-            <div><div className="font-semibold">Trade Exchange</div>
-              <div className="text-xs text-gray-500">Service · Players · Actions · Events</div></div>
-          </div>
-          {/* Search moved into dedicated pages (Home & Results) for better layout */}
-          <div className="flex items-center gap-2">
-            {/* Hide marketing links after login */}
+    <div className="min-h-screen bg-gradient-to-b from-white via-gray-50 to-gray-100 text-gray-900">
+      <header className="sticky top-0 z-10 border-b border-gray-200 bg-white/75 backdrop-blur">
+        <div className="tx-container flex items-center justify-between py-4">
+          <button type="button" className="flex items-center gap-3" onClick={() => navigate('/')}
+            aria-label="Go to home">
+            <div className="grid size-10 place-items-center rounded-2xl bg-gray-900 text-base font-semibold uppercase tracking-wide text-white">TX</div>
+            <div className="text-left">
+              <div className="text-sm font-semibold uppercase tracking-[0.18em] text-gray-600">Trade Exchange</div>
+              <div className="text-sm font-medium text-gray-900">Service · Players · Actions · Events</div>
+            </div>
+          </button>
+          <nav className="flex flex-wrap items-center justify-end gap-3 text-sm font-medium text-gray-700">
             {!me && (
               <>
-                <Link to="/how-it-works" className="text-sm text-gray-700 hover:underline">How it works</Link>
-                <Link to="/pricing" className="text-sm text-gray-700 hover:underline">Pricing</Link>
-                <Link to="/become-a-provider" className="text-sm underline">Become a provider</Link>
+                <Link to="/how-it-works" className="rounded-lg px-3 py-2 hover:bg-gray-100">How it works</Link>
+                <Link to="/pricing" className="rounded-lg px-3 py-2 hover:bg-gray-100">Pricing</Link>
+                <Link to="/become-a-provider" className="rounded-lg px-3 py-2 text-gray-900 hover:bg-gray-100">Become a provider</Link>
               </>
             )}
-            <Link to="/messages" className="text-sm text-gray-700 hover:underline">Messages</Link>
+            {me && <Link to="/" className="rounded-lg px-3 py-2 text-gray-900 hover:bg-gray-100">Home</Link>}
+            <Link to="/messages" className="rounded-lg px-3 py-2 hover:bg-gray-100">Messages</Link>
+            <Link to="/customer-details" className="rounded-lg px-3 py-2 hover:bg-gray-100">Customer details</Link>
             {!me && (
               <>
-                <Link to="/signin" className="text-sm underline">Sign in</Link>
-                <Link to="/signup" className="text-sm underline">Sign up</Link>
+                <Link to="/signin" className="rounded-lg px-3 py-2 text-gray-900 hover:bg-gray-100">Sign in</Link>
+                <Link to="/signup" className="rounded-lg px-3 py-2 text-gray-900 hover:bg-gray-100">Sign up</Link>
               </>
             )}
             {me && (
               <>
-                <Link to={dashboardPath} className="text-sm underline">{admin ? 'Admin' : 'Dashboard'}</Link>
+                <Link to={dashboardPath} className="rounded-lg px-3 py-2 text-gray-900 hover:bg-gray-100">{admin ? 'Status board' : 'Status'}</Link>
                 <Button variant="ghost" onClick={signOut}>Sign out</Button>
               </>
             )}
-          </div>
+          </nav>
         </div>
       </header>
 
       <Routes>
-        <Route path="/" element={me ? <Navigate replace to={dashboardPath} /> : <HomeSearch onSearch={onSubmit} q={q} setQ={setQ} />} />
+        <Route path="/" element={<HomeEntry me={me} loading={loadingMe} q={q} setQ={setQ} onSearch={onSubmit} />} />
         <Route path="/results" element={<ResultsPage />} />
         <Route path="/provider/:id" element={<TraderDetailsPage />} />
         <Route path="/confirm/:listingId/:providerId/:price" element={<ConfirmationPage />} />
         <Route path="/checkout/:listingId/:providerId/:price" element={<CheckoutPage />} />
+        <Route path="/customer-details" element={<CustomerDetails />} />
+        <Route path="/payment/success" element={<StripeSuccess />} />
 
-        <Route path="/signin" element={me ? <Navigate replace to={dashboardPath} /> : <SignIn onAuthed={loadMe} />} />
-        <Route path="/signup" element={me ? <Navigate replace to={dashboardPath} /> : <SignUp onAuthed={loadMe} />} />
+        <Route path="/signin" element={me ? <Navigate replace to="/" /> : <SignIn onAuthed={loadMe} />} />
+        <Route path="/signup" element={me ? <Navigate replace to="/" /> : <SignUp onAuthed={loadMe} />} />
         <Route path="/dashboard/user" element={<UserOnly me={me} loading={loadingMe}><UserDashboard /></UserOnly>} />
         <Route path="/dashboard/trader" element={<TraderOnly me={me} loading={loadingMe}><TraderDashboard /></TraderOnly>} />
         <Route path="/admin" element={<AdminOnly me={me} loading={loadingMe}><AdminDashboard /></AdminOnly>} />
@@ -156,7 +162,7 @@ export default function App(){
         <Route path="/messages/:id" element={<ConversationPage />} />
 
         <Route path="/about" element={<About />} />
-        <Route path="/become-a-provider" element={me && (admin || trader || me?.providerPlayerId) ? <Navigate replace to={dashboardPath} /> : <BecomeProvider />} />
+        <Route path="/become-a-provider" element={me && (admin || trader || me?.providerPlayerId) ? <Navigate replace to="/" /> : <BecomeProvider />} />
         <Route path="/contact" element={<Contact />} />
         <Route path="/help" element={<Help />} />
         <Route path="/pricing" element={<Pricing />} />
@@ -168,29 +174,30 @@ export default function App(){
         <Route path="*" element={<NotFound />} />
       </Routes>
 
-      <footer className="border-t mt-10">
-        <div className="max-w-6xl mx-auto px-4 py-8 grid sm:grid-cols-3 gap-6 text-sm">
-          <div>
-            <div className="font-semibold mb-2">Trade Exchange</div>
-            <div className="text-gray-600">Service · Players · Actions · Events</div>
+      <footer className="mt-16 border-t border-gray-200 bg-white/80">
+        <div className="tx-container grid gap-10 py-12 text-sm text-gray-600 sm:grid-cols-3">
+          <div className="space-y-3">
+            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-gray-500">Trade Exchange</div>
+            <p className="text-sm text-gray-700">Service · Players · Actions · Events</p>
+            <p className="text-xs text-gray-500">Connecting players with trusted providers worldwide.</p>
           </div>
-          <nav className="space-y-1 text-gray-700">
-            <div className="font-medium">Company</div>
-            <Link to="/about" className="block hover:underline">About</Link>
-            <Link to="/how-it-works" className="block hover:underline">How it works</Link>
-            <Link to="/pricing" className="block hover:underline">Pricing</Link>
-            <Link to="/become-a-provider" className="block hover:underline">Become a provider</Link>
-            <Link to="/contact" className="block hover:underline">Contact</Link>
+          <nav className="space-y-2">
+            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-gray-500">Company</div>
+            <Link to="/about" className="flex items-center justify-between rounded-lg px-3 py-2 hover:bg-gray-100">About</Link>
+            <Link to="/how-it-works" className="flex items-center justify-between rounded-lg px-3 py-2 hover:bg-gray-100">How it works</Link>
+            <Link to="/pricing" className="flex items-center justify-between rounded-lg px-3 py-2 hover:bg-gray-100">Pricing</Link>
+            <Link to="/become-a-provider" className="flex items-center justify-between rounded-lg px-3 py-2 hover:bg-gray-100">Become a provider</Link>
+            <Link to="/contact" className="flex items-center justify-between rounded-lg px-3 py-2 hover:bg-gray-100">Contact</Link>
           </nav>
-          <nav className="space-y-1 text-gray-700">
-            <div className="font-medium">Support & Legal</div>
-            <Link to="/help" className="block hover:underline">Help / FAQ</Link>
-            <Link to="/safety" className="block hover:underline">Trust & safety</Link>
-            <Link to="/terms" className="block hover:underline">Terms</Link>
-            <Link to="/privacy" className="block hover:underline">Privacy</Link>
+          <nav className="space-y-2">
+            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-gray-500">Support & Legal</div>
+            <Link to="/help" className="flex items-center justify-between rounded-lg px-3 py-2 hover:bg-gray-100">Help / FAQ</Link>
+            <Link to="/safety" className="flex items-center justify-between rounded-lg px-3 py-2 hover:bg-gray-100">Trust & safety</Link>
+            <Link to="/terms" className="flex items-center justify-between rounded-lg px-3 py-2 hover:bg-gray-100">Terms</Link>
+            <Link to="/privacy" className="flex items-center justify-between rounded-lg px-3 py-2 hover:bg-gray-100">Privacy</Link>
           </nav>
         </div>
-        <div className="text-xs text-gray-500 text-center pb-8">© {new Date().getFullYear()} Trade Exchange</div>
+        <div className="border-t border-gray-200 py-6 text-center text-xs text-gray-500">© {new Date().getFullYear()} Trade Exchange. All rights reserved.</div>
       </footer>
     </div>
   )

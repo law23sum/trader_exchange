@@ -1,5 +1,53 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
-:root { color-scheme: light; }
-body { @apply bg-gray-50 text-gray-900; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica Neue, Arial, 'Apple Color Emoji', 'Segoe UI Emoji'; }
+
+:root {
+  color-scheme: light;
+  --tx-max-width: 72rem;
+  --tx-section-gap: 3.5rem;
+  --tx-card-radius: 1.25rem;
+}
+
+@layer base {
+  body {
+    @apply bg-gray-50 text-gray-900 antialiased leading-relaxed;
+    font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica Neue, Arial, 'Apple Color Emoji', 'Segoe UI Emoji';
+  }
+
+  h1 {
+    @apply text-4xl font-semibold tracking-tight text-gray-900;
+  }
+
+  h2 {
+    @apply text-2xl font-semibold tracking-tight text-gray-900;
+  }
+
+  h3 {
+    @apply text-xl font-semibold tracking-tight text-gray-900;
+  }
+
+  p {
+    @apply text-base leading-relaxed text-gray-700;
+  }
+
+  a {
+    @apply transition-colors;
+  }
+}
+
+@layer components {
+  .tx-container {
+    @apply mx-auto w-full px-4 sm:px-6 lg:px-8;
+    max-width: var(--tx-max-width);
+  }
+
+  .tx-section {
+    @apply py-10 sm:py-14;
+    gap: var(--tx-section-gap);
+  }
+
+  .tx-card {
+    @apply rounded-[var(--tx-card-radius)] border border-gray-200 bg-white/90 shadow-sm backdrop-blur-sm;
+  }
+}
